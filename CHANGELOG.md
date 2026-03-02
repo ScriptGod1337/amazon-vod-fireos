@@ -4,6 +4,76 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 
 ## [Unreleased]
 
+## [2026.03.03] - 2026-03-03
+
+### Added (Phase 34 — Playback Completion Auto-advance)
+- **Auto-advance to next episode** — when `STATE_ENDED` fires for an episode with a known season ASIN, `PlayerActivity` fetches the season's ordered episode list and immediately starts the next episode; if it is the last episode (or the lookup fails), `finish()` returns to the season browse screen
+- **Movie / trailer completion** — `finish()` closes the player and returns to the launch screen (detail page, home, etc.) with no extra steps required
+- `ProgressRepository.ProgressEntry` now stores `seasonAsin`; `update()` accepts and persists it from `PlayerActivity.currentSeasonAsin` so every progress save carries season context forward
+- `withRepositoryProgress()` in `MainActivity` propagates `ProgressEntry.seasonAsin` back to `ContentItem.seasonId` so Continue Watching items rebuilt on `onResume()` carry the correct season context for auto-advance
+
+### Fixed (Phase 34)
+- **Player resource leak on episode transition** — `setupPlayer()` now calls `player?.removeListener` + `player?.release()` before building a new `ExoPlayer` instance, preventing renderer/listener leaks across episode boundaries
+- **Progress not marked finished on natural completion** — `persistPlaybackProgress(force = true)` is now the first call in `STATE_ENDED` so the completed item is written as `-1L` (≥ 90% watched) before any teardown
+- **Continue Watching rail not refreshed after finishing** — `buildContinueWatchingRail()` now runs all candidate items through `withRepositoryProgress()` and filters `watchProgressMs > 0`, so finished items drop from the CW row on the next `onResume()` without waiting for a server refresh
+- **Season ASIN not passed from Home CW direct-play** — `openPlayer()` in `MainActivity` now passes `EXTRA_SERIES_ASIN` and `EXTRA_SEASON_ASIN`; all three launch paths (Browse, Detail, Home CW) now supply the season context required for auto-advance
+- **Local-only series resume missing season context** — `DetailActivity` local-fallback `ContentItem` synthesis now sets `seasonId` from `ProgressEntry.seasonAsin`; `BrowseActivity` stores the browse ASIN as `browseAsin` and uses it as fallback when `item.seasonId` is empty in the episode-list context
+
+## [2026.03.02] - 2026-03-02
+
+### Added (Phase 33 — Scrub Thumbnail Preview + Series Resume)
+- **Seek scrub thumbnail preview** — small CardView above the seekbar during D-pad left/right seeking shows the frame at the target position plus a time label; thumbnail frames fetched on demand from Amazon **BIF files** (binary trickplay format) via HTTP Range requests; 480p BIF preferred, first available URL as fallback
+- BIF index downloaded once per playback session (header + index via single Range request); individual JPEG frames Range-fetched per scrub position using binary search on the timestamp table
+- **Series detail Resume button** — `DetailActivity` shows a `▶ Resume S{n}E{n}` or `▶ Resume Episode` button for series when `ProgressRepository` has in-progress episode data for that show; checks server-backed items first, falls back to local progress map entries; `onResume()` refreshes all detail-page grids (seasons, episodes, watchlist items) from `ProgressRepository`
+
+### Fixed (Phase 33 post-ship)
+- Seek overlay accumulating time instead of showing absolute position — fixed position calculation
+- No black area in seek overlay — `iv_seek_thumbnail` now has a 22 dp bottom margin, leaving room for the time label
+- Dark placeholder background visible until first BIF frame loads — `CardView` background provides implicit dark fill; `ImageView` starts transparent
+- D-pad seek (Fire TV remote) now triggers the thumbnail overlay, not just `TimeBar` scrub events
+- Series resume shortcut now surfaces even when `inProgressItems` is empty (local-only fallback via `getLocalProgressForSeries`)
+
+### Added (Phase 32 — Post-Phase 31 Analysis Fixes)
+- `UiMetadataFormatter.progressText()` helper — canonical progress percentage + remaining-time string shared by detail page and content cards, eliminating formula divergence
+
+### Fixed (Phase 32)
+- `-1L` finished sentinel was invisible on detail page — `bindProgress()` guard changed from `posMs <= 0L` to `posMs == 0L`; `-1L` now shows "Finished recently" with no progress bar
+- Detail page stale after returning from player — `DetailActivity.onResume()` re-reads `ProgressRepository` and updates button text + progress bar
+- Progress percent formula diverged between detail page and content cards — unified via `UiMetadataFormatter.progressText()`
+- `OTHER`-type content label showed "Featured" instead of "Movie" — unified `contentLabel()` and `defaultOverline()` catch-all
+- Season trailer button suppressed by `!isSeries` guard — fixed to `(!isSeries || isSeason)` so seasons with a trailer show the Trailer button
+- Watchlist double-tap sent duplicate API calls — `watchlistUpdateInFlight` guard added with `try/finally`
+- Redundant `pbWatchProgress.max = 1000` in `bindProgress()` removed (XML is single source of truth)
+
+## [2026.03.02.1] - 2026-03-02
+
+### Added (Phase 31 — Detail Page + Hero Strip Progress Polish)
+- **Amber progress bar on detail page** — shown under the title for partially-watched titles; uses `UiMetadataFormatter.progressText()` format ("X% watched · Y min left")
+- **▶ Resume / ▶ Play distinction** — detail page Play button shows "▶  Resume S{n}E{n}" for in-progress episodes, "▶  Resume" for in-progress movies, "▶  Play" otherwise
+- **▷ Trailer** button now has a distinct outline icon, shown only when `isTrailerAvailable: true`
+- **Hero strip progress bar** — amber progress overlay on the featured strip thumbnail for in-progress titles, with "X% watched · Y min left" meta override
+
+### Fixed (Phase 31)
+- Removed redundant "Feature film" overline fallback on movie cards (overline already shows "Movie")
+
+## [2026.03.01.6] - 2026-03-01
+
+### Added (Phase 30 — Centralized Progress Repository)
+- **`ProgressRepository`** — single source of truth for all ASIN watch progress; server-first on refresh, local `SharedPreferences` cache during and between sessions; concurrent-safe with `ConcurrentHashMap`
+- `ProgressRepository.refresh()` — merges server watchlist progress (winner) on top of local cache; called on app start and on TTL expiry (10 min)
+- Periodic local progress writes every 30 s during playback; forced write on pause, stop, seek, and error
+- `ProgressRepository.getInProgressEntries()` / `getInProgressItems()` — used by Continue Watching and detail page resume logic
+- Home can backfill local-only Continue Watching items by resolving ASIN metadata through the detail API
+
+### Fixed (Phase 30 / Phase 29 post-fixes)
+- Continue Watching direct-play now passes explicit resume position to the player
+- Server-side `remainingTimeInSeconds` correctly interpreted as remaining time, not watched time
+- Progress bars on home rails now reflect local progress immediately after playback without waiting for a server refresh
+
+### Added (Phase 29 — Continue Watching Row)
+- **Continue Watching rail** — first rail on the home screen, built from centralized `ProgressRepository`; shows amber progress bars and "X% watched · Y min left" subtitles; hero strip overrides eyebrow to "CONTINUE WATCHING" and meta to progress format; rail bypasses source/type filters
+- Direct-play from CW card or hero strip opens the player immediately with the saved resume position
+
 ## [2026.03.01.5] - 2026-03-01
 
 ### Fixed (Phase 27 review findings)

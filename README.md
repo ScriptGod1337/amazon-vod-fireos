@@ -40,6 +40,7 @@ Selecting any movie or series opens a full detail screen before playback:
 - **Seekbar seeking** — D-pad left/right seeks ±10 seconds per press (hold to repeat)
 - **Resume from last position** — auto-seeks to where you left off; direct-play surfaces pass the saved position explicitly so resume works even after local cache is cleared
 - **Watch progress tracking** via UpdateStream API (START / PLAY / PAUSE / STOP) + PES V2 session reporting
+- **Auto-advance to next episode** — on natural completion the player fetches the season's ordered episode list and immediately starts the next one; returns to the season screen at the end of a season; movies and trailers close the player on completion
 
 ### Progress & Watchlist
 
@@ -181,26 +182,27 @@ system service via a hidden MediaSession proxy on Fire OS. Not implemented.
 See [dev/progress.md](dev/progress.md) for the full phase-by-phase build history and upcoming work.
 
 **Recently completed:**
-- **Phase 31** — Minor UI polish: detail page amber progress bar + "X% watched · Y min left" for
-  partially watched titles; **▶ Resume** / **▶ Play** distinction on the Play button; **▷ Trailer**
-  distinct outline icon; amber progress bar on home hero strip thumbnail; removed redundant
-  "Feature film" fallback label from movie cards (overline already says "Movie")
-- **Phase 30** — Centralized `ProgressRepository`: single source of truth for all ASIN progress;
-  server-first refresh + local fallback cache; periodic local writes during playback; no more
-  progress intent chain; Home can backfill local-only Continue Watching items by ASIN; Continue
-  Watching movies and episodes now direct-play and pass explicit resume positions to the player
-- **Phase 29** — Continue Watching row: first rail on the home screen built from server-side
-  watchlist progress; amber progress bars + remaining-time subtitles; hero strip overrides to
-  progress meta; bypasses source/type filters; `RailsAdapter` adapter-reuse fix eliminates
-  first-item flicker; pool contamination fix in `ContentAdapter`
-- **Phase 28** — Widevine L3/SD fallback: emulator playback enabled; L3 device detected at
-  player-creation time and forced to SD quality (mirrors official APK `ConfigurablePlaybackSupportEvaluator`)
+- **Phase 34** — Playback completion auto-advance: episodes auto-play the next episode on
+  `STATE_ENDED`; movies/trailers close the player; finished items drop from the CW row
+  immediately; season ASIN propagated through all launch paths (Browse, Detail, Home CW);
+  player resource leak on episode transition fixed; progress correctly marked `-1L` on completion
+- **Phase 33** — BIF trickplay scrub preview: seek thumbnail CardView shown above the seekbar
+  during D-pad scrubbing, frames fetched on demand via HTTP Range from Amazon BIF files;
+  series detail Resume button (server-backed or local-only fallback)
+- **Phase 32** — Post-Phase 31 analysis fixes: `-1L` finished sentinel now shown as "Finished
+  recently"; detail page refreshes on return from player; progress percent formula unified;
+  player resource and coroutine-leak fixes
+- **Phase 31** — Detail page amber progress bar + "X% watched · Y min left"; **▶ Resume** /
+  **▶ Play** distinction; **▷ Trailer** distinct outline icon; hero strip progress bar
+- **Phase 30** — Centralized `ProgressRepository`: server-first refresh + local cache; Home
+  backfills local-only Continue Watching items; direct-play passes explicit resume positions
+- **Phase 29** — Continue Watching row: first rail on home built from watchlist progress;
+  amber progress bars + remaining-time subtitles; bypasses source/type filters
 
 **Next up:**
-- Seekbar thumbnail preview during scrubbing (Phase 32) — requires DASH trick-play track
-  investigation per title before UI implementation
 - Deeper cross-device progress conflict resolution if Amazon exposes a trustworthy backend
   progress timestamp in a future API path
+- Per-series watch history / episode-level progress tracking improvements
 
 ## Requirements
 

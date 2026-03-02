@@ -2134,3 +2134,8 @@ real mechanism: `TrickplayPlugin$DownloadBifFileFromUrl` + `Resource` enum value
 - ✅ Movie ends → `finish()` confirmed on device (logcat: `onPlaybackCompleted → finish (no season/trailer)`)
 - ✅ Episode ends → next episode auto-plays confirmed on device (logcat: `onPlaybackCompleted → auto-play next episode`, `loadAndPlay` called with new ASIN, same season ASIN)
 - Note: `item.seasonId` is empty for episodes listed in BrowseActivity; fixed by storing `browseAsin` as class field and using it as fallback when `currentFilter == "episodes"`
+- ✅ CW rail removes finished items on next `onResume()` — `buildContinueWatchingRail()` applies `withRepositoryProgress` + `filter { watchProgressMs > 0 }`
+- ✅ Home CW direct-play passes `EXTRA_SEASON_ASIN` — `openPlayer()` updated; `withRepositoryProgress()` propagates `ProgressEntry.seasonAsin` → `ContentItem.seasonId`
+- ✅ `ProgressEntry` stores `seasonAsin`; `persistPlaybackProgress()` writes `currentSeasonAsin`
+- ✅ Local-only series resume `ContentItem` synthesis sets `seasonId` from `ProgressEntry.seasonAsin`
+- ✅ Old `ExoPlayer` released in `setupPlayer()` before building a new instance (no renderer leak)
