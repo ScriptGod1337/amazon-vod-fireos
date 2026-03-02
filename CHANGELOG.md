@@ -4,7 +4,7 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 
 ## [Unreleased]
 
-## [2026.03.03] - 2026-03-03
+## [2026.03.03.1] - 2026-03-03
 
 ### Added (Phase 34 — Playback Completion Auto-advance)
 - **Auto-advance to next episode** — when `STATE_ENDED` fires for an episode with a known season ASIN, `PlayerActivity` fetches the season's ordered episode list and immediately starts the next episode; if it is the last episode (or the lookup fails), `finish()` returns to the season browse screen
@@ -19,8 +19,6 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 - **Season ASIN not passed from Home CW direct-play** — `openPlayer()` in `MainActivity` now passes `EXTRA_SERIES_ASIN` and `EXTRA_SEASON_ASIN`; all three launch paths (Browse, Detail, Home CW) now supply the season context required for auto-advance
 - **Local-only series resume missing season context** — `DetailActivity` local-fallback `ContentItem` synthesis now sets `seasonId` from `ProgressEntry.seasonAsin`; `BrowseActivity` stores the browse ASIN as `browseAsin` and uses it as fallback when `item.seasonId` is empty in the episode-list context
 
-## [2026.03.02] - 2026-03-02
-
 ### Added (Phase 33 — Scrub Thumbnail Preview + Series Resume)
 - **Seek scrub thumbnail preview** — small CardView above the seekbar during D-pad left/right seeking shows the frame at the target position plus a time label; thumbnail frames fetched on demand from Amazon **BIF files** (binary trickplay format) via HTTP Range requests; 480p BIF preferred, first available URL as fallback
 - BIF index downloaded once per playback session (header + index via single Range request); individual JPEG frames Range-fetched per scrub position using binary search on the timestamp table
@@ -32,6 +30,8 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 - Dark placeholder background visible until first BIF frame loads — `CardView` background provides implicit dark fill; `ImageView` starts transparent
 - D-pad seek (Fire TV remote) now triggers the thumbnail overlay, not just `TimeBar` scrub events
 - Series resume shortcut now surfaces even when `inProgressItems` is empty (local-only fallback via `getLocalProgressForSeries`)
+
+## [2026.03.02.4] - 2026-03-02
 
 ### Added (Phase 32 — Post-Phase 31 Analysis Fixes)
 - `UiMetadataFormatter.progressText()` helper — canonical progress percentage + remaining-time string shared by detail page and content cards, eliminating formula divergence
@@ -45,7 +45,7 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 - Watchlist double-tap sent duplicate API calls — `watchlistUpdateInFlight` guard added with `try/finally`
 - Redundant `pbWatchProgress.max = 1000` in `bindProgress()` removed (XML is single source of truth)
 
-## [2026.03.02.1] - 2026-03-02
+## [2026.03.02.3] - 2026-03-02
 
 ### Added (Phase 31 — Detail Page + Hero Strip Progress Polish)
 - **Amber progress bar on detail page** — shown under the title for partially-watched titles; uses `UiMetadataFormatter.progressText()` format ("X% watched · Y min left")
@@ -56,7 +56,12 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 ### Fixed (Phase 31)
 - Removed redundant "Feature film" overline fallback on movie cards (overline already shows "Movie")
 
-## [2026.03.01.6] - 2026-03-01
+## [2026.03.02.2] - 2026-03-02
+
+### Fixed
+- Continue Watching direct-play now passes explicit resume position to the player so resume works correctly when launched from the CW rail or hero strip
+
+## [2026.03.02.1] - 2026-03-02
 
 ### Added (Phase 30 — Centralized Progress Repository)
 - **`ProgressRepository`** — single source of truth for all ASIN watch progress; server-first on refresh, local `SharedPreferences` cache during and between sessions; concurrent-safe with `ConcurrentHashMap`
@@ -66,7 +71,6 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 - Home can backfill local-only Continue Watching items by resolving ASIN metadata through the detail API
 
 ### Fixed (Phase 30 / Phase 29 post-fixes)
-- Continue Watching direct-play now passes explicit resume position to the player
 - Server-side `remainingTimeInSeconds` correctly interpreted as remaining time, not watched time
 - Progress bars on home rails now reflect local progress immediately after playback without waiting for a server refresh
 
