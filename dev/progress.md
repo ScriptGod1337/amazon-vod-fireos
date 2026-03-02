@@ -1834,3 +1834,28 @@ body as a separate property (not always present; varies by title and region).
 | Hero strip progress bar | `activity_main.xml`, `MainActivity.kt` | `iv_home_featured` wrapped in `FrameLayout`; amber `ProgressBar` at bottom; wired via `ProgressRepository.get()` in `updateHomeFeaturedStrip()` |
 | Seekbar thumbnail preview | — | Deferred to Phase 32 — requires DASH trick-play track investigation per title |
 
+### Post-ship analysis
+
+A full audit of Phase 31's implementation was conducted after shipping.
+See `dev/phase31-analysis.md` for the detailed findings.
+
+**Summary of issues found:**
+
+| ID | Priority | Description |
+|----|----------|-------------|
+| P0-A | P0 | `-1L` sentinel (fully-watched) produces blank detail page — "Finished recently" never shown |
+| P0-B | P0 | No `onResume()` in `DetailActivity` — button text and bar stale after returning from player |
+| P1-A | P1 | Progress % formula diverges: detail page double-truncates vs card subtitle single-truncation |
+| P1-B | P1 | `OTHER` type → "MOVIE" on detail page eyebrow, "Featured" on card overline |
+| P1-C | P1 | Season detail suppresses Trailer button even when `isTrailerAvailable = true` |
+| P2-A | P2 | Redundant `pbWatchProgress.max = 1000` in code couples to XML value silently |
+| P2-B | P2 | Watchlist toggle has no in-flight guard — double-tap sends duplicate API calls |
+| P2-C | P2 | `getInProgressEntries()` has redundant `!= -1L` (`-1L > 0L` already excludes it) |
+| P2-D | P2 | `refresh()` can overwrite newer local progress with older server value |
+| P3-A | P3 | Series detail page has no last-episode resume shortcut |
+| P3-B | P3 | No TTL or background refresh for `ProgressRepository` |
+| P3-C | P3 | `seriesAsin` not set in `detailInfoToContentItem()` — blocks future series resume |
+| P3-D | P3 | `contentLabel()` catch-all `"Featured"` is misleading for movie-like unknown types |
+
+P0 and P1 fixes are planned for the next phase alongside the seekbar thumbnail feature.
+
