@@ -65,6 +65,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil)
     implementation(libs.material)
+    implementation(libs.androidx.cardview)
     implementation(libs.shimmer)
     testImplementation(libs.junit4)
 }

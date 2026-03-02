@@ -38,6 +38,8 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
 import com.scriptgod.fireos.avod.R
 import com.scriptgod.fireos.avod.api.AmazonApiService
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import com.scriptgod.fireos.avod.auth.AmazonAuthService
 import com.scriptgod.fireos.avod.data.ProgressRepository
 import com.scriptgod.fireos.avod.drm.AmazonLicenseService
@@ -115,6 +117,10 @@ class PlayerActivity : AppCompatActivity() {
     private var h265FallbackPositionMs: Long = 0L
     private var lastResumeSaveElapsedMs: Long = 0L
     private var seekResyncPending: Boolean = false
+    private var currentPlaybackInfo: PlaybackInfo? = null
+    private lateinit var cardSeekThumbnail: androidx.cardview.widget.CardView
+    private lateinit var ivSeekThumbnail: android.widget.ImageView
+    private val thumbnailCache = android.util.LruCache<String, android.graphics.Bitmap>(8)
     private val hideTrackButtonsRunnable = Runnable {
         trackButtons.clearFocus()
         trackButtons.visibility = View.GONE
@@ -198,6 +204,8 @@ class PlayerActivity : AppCompatActivity() {
         tvPlaybackHint = findViewById(R.id.tv_playback_hint)
         btnAudio = findViewById(R.id.btn_audio)
         btnSubtitle = findViewById(R.id.btn_subtitle)
+        cardSeekThumbnail = findViewById(R.id.card_seek_thumbnail)
+        ivSeekThumbnail = findViewById(R.id.iv_seek_thumbnail)
         tvPlaybackTitle.text = intent.getStringExtra(EXTRA_TITLE) ?: "Now Playing"
         tvPlaybackHint.text = "Press MENU for tracks. Press Back to exit."
         tvVideoFormat.visibility = View.GONE
@@ -214,7 +222,17 @@ class PlayerActivity : AppCompatActivity() {
         // 10 s per key press matches standard TV remote behaviour.
         playerView.findViewById<androidx.media3.ui.DefaultTimeBar>(
             androidx.media3.ui.R.id.exo_progress
-        )?.setKeyTimeIncrement(10_000L)
+        )?.also { timeBar ->
+            timeBar.setKeyTimeIncrement(10_000L)
+            timeBar.addListener(object : androidx.media3.ui.TimeBar.OnScrubListener {
+                override fun onScrubStart(timeBar: androidx.media3.ui.TimeBar, position: Long) =
+                    showThumbnailAt(position)
+                override fun onScrubMove(timeBar: androidx.media3.ui.TimeBar, position: Long) =
+                    showThumbnailAt(position)
+                override fun onScrubStop(timeBar: androidx.media3.ui.TimeBar, position: Long, canceled: Boolean) =
+                    hideThumbnail()
+            })
+        }
 
         // Sync trackButtons visibility with the PlayerView controller so they
         // always appear and disappear together.
@@ -226,6 +244,7 @@ class PlayerActivity : AppCompatActivity() {
                 } else {
                     trackButtons.removeCallbacks(syncTrackButtonsRunnable)
                     hideTrackButtonsRunnable.run()
+                    hideThumbnail()
                 }
             }
         )
@@ -357,6 +376,7 @@ class PlayerActivity : AppCompatActivity() {
             availableAudioTracks = (info.audioTracks + detailAudioTracks)
                 .distinctBy { "${it.displayName}|${it.languageCode}|${it.type}|${it.index}" }
             logAvailableAudioTracks("Merged audio metadata", availableAudioTracks)
+            currentPlaybackInfo = info
             setupPlayer(info)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch playback info: ${e.message}", e)
@@ -726,6 +746,58 @@ class PlayerActivity : AppCompatActivity() {
         if (!force && posMs - lastResumeSaveElapsedMs < 25_000L) return
         ProgressRepository.update(currentAsin, posMs, p.duration, currentMaterialType)
         lastResumeSaveElapsedMs = posMs
+    }
+
+    private fun showThumbnailAt(posMs: Long) {
+        val info = currentPlaybackInfo ?: return
+        if (!info.hasThumbnails) return
+
+        val framesPerSheet = info.spriteColumns * info.spriteRows
+        val totalFrame = (posMs / 1000L / info.frameIntervalSec).toInt()
+        val segmentNumber = (totalFrame / framesPerSheet) + 1
+        val frameInSheet = totalFrame % framesPerSheet
+        val col = frameInSheet % info.spriteColumns
+        val row = frameInSheet / info.spriteColumns
+        val url = info.thumbnailTrackUrl.replace("\$Number\$", segmentNumber.toString())
+
+        val cached = thumbnailCache.get(url)
+        if (cached != null) {
+            val frame = cropFrame(cached, col, row, info.frameWidthPx, info.frameHeightPx)
+            ivSeekThumbnail.setImageBitmap(frame)
+            cardSeekThumbnail.visibility = View.VISIBLE
+            return
+        }
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                val response = okhttp3.OkHttpClient().newCall(
+                    okhttp3.Request.Builder().url(url).get().build()
+                ).execute()
+                val bytes = response.body?.bytes() ?: return@launch
+                val sheet = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    ?: return@launch
+                thumbnailCache.put(url, sheet)
+                val frame = cropFrame(sheet, col, row, info.frameWidthPx, info.frameHeightPx)
+                withContext(Dispatchers.Main) {
+                    ivSeekThumbnail.setImageBitmap(frame)
+                    cardSeekThumbnail.visibility = View.VISIBLE
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Thumbnail load failed: $url", e)
+            }
+        }
+    }
+
+    private fun cropFrame(sheet: android.graphics.Bitmap, col: Int, row: Int, fw: Int, fh: Int): android.graphics.Bitmap {
+        val x = (col * fw).coerceAtMost(sheet.width - fw).coerceAtLeast(0)
+        val y = (row * fh).coerceAtMost(sheet.height - fh).coerceAtLeast(0)
+        val w = fw.coerceAtMost(sheet.width - x)
+        val h = fh.coerceAtMost(sheet.height - y)
+        return android.graphics.Bitmap.createBitmap(sheet, x, y, w, h)
+    }
+
+    private fun hideThumbnail() {
+        cardSeekThumbnail.visibility = View.GONE
     }
 
     private fun updatePlaybackWakeState(isPlaying: Boolean) {

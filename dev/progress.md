@@ -1893,3 +1893,157 @@ P0 and P1 fixes are planned for the next phase alongside the seekbar thumbnail f
 - P3-C: `seriesAsin` not set in `detailInfoToContentItem()`
 - P2-D alternative merge policy — server-first refresh was kept to preserve Decision 25 and README behavior
 - Seekbar thumbnail preview (deferred from Phase 31)
+
+---
+
+## Phase 33: PLANNED — Player Scrub Preview + Series Resume
+
+### Goal
+
+Deliver the two highest-value remaining playback UX improvements:
+
+1. **Player scrub preview overlay** — the small preview window shown above the seekbar while the
+   user scrubs left/right in the player controls, matching the behavior of the official app.
+2. **Series detail resume shortcut** — a direct `Resume Episode` action on series detail pages
+   when the app already knows the user has in-progress episode data for that show.
+
+This phase should stay focused on playback/navigation quality, not broader metadata caching or
+cross-device sync redesign.
+
+### User-facing behavior
+
+#### 1. Scrub preview overlay
+
+When the user focuses the player seekbar and presses left/right:
+- a small preview card appears above the seekbar
+- it updates as the target position changes
+- it hides when scrubbing stops or when the player controls auto-hide
+
+This preview is an **image thumbnail**, not a second video player.
+
+#### 2. Series resume shortcut
+
+When the user opens a series detail page and the app can identify an in-progress episode:
+- the primary action becomes `▶ Resume Sx Ex`
+- selecting it starts playback for that episode directly
+- `Browse Seasons` remains available as the fallback navigation path
+
+### Technical design
+
+#### Part A — Trick-play thumbnail metadata
+
+Amazon likely exposes seek previews through a DASH image adaptation set ("trick-play" track).
+Implementation should prefer manifest- or playback-resource-driven metadata, not runtime video
+frame extraction.
+
+**Model changes**:
+
+Extend `PlaybackInfo` with optional thumbnail metadata:
+
+```kotlin
+val thumbnailTrackUrl: String = ""
+val frameIntervalSec: Int = 0
+val spriteColumns: Int = 0
+val spriteRows: Int = 0
+val frameWidthPx: Int = 0
+val frameHeightPx: Int = 0
+```
+
+**API layer**:
+- `AmazonApiService.getPlaybackInfo()`
+  - inspect `GetPlaybackResources`
+  - if no direct thumbnail metadata is present, fetch/parse the MPD
+  - detect image/trick-play adaptation sets
+- expected inputs:
+  - sprite sheet URL template
+  - frame interval
+  - sprite grid dimensions
+  - frame dimensions
+
+**Important rule**:
+- if no trick-play metadata is found, leave all fields empty/zero and degrade gracefully
+
+#### Part B — Player overlay implementation
+
+**Files**:
+- `app/src/main/res/layout/activity_player.xml`
+- `app/src/main/java/com/scriptgod/fireos/avod/ui/PlayerActivity.kt`
+
+**Layout**:
+- add a small floating thumbnail card above `exo_progress`
+- suggested size: about `160dp x 90dp`
+- hidden by default
+
+**Player logic**:
+- attach `DefaultTimeBar.OnScrubListener`
+- on scrub start / move:
+  - compute frame index from target position
+  - compute sprite sheet index + crop rect
+  - load sprite sheet off the main thread
+  - crop the correct frame with `BitmapRegionDecoder`
+  - show/update the preview card
+- on scrub stop:
+  - hide preview card
+
+**Visibility behavior**:
+- preview must disappear with the player controls
+- no independent linger/flicker behavior
+
+#### Part C — Series resume shortcut
+
+**Files**:
+- `app/src/main/java/com/scriptgod/fireos/avod/ui/DetailActivity.kt`
+- `app/src/main/java/com/scriptgod/fireos/avod/data/ProgressRepository.kt`
+- `app/src/main/java/com/scriptgod/fireos/avod/ui/MainActivity.kt`
+
+**Needed data work**:
+- preserve enough parent-series identity on episode items
+- specifically ensure locally resolved progress-backed items keep:
+  - `seriesAsin`
+  - `showId`
+  - `seasonId` when available
+
+**Series detail behavior**:
+- if current page is a series and an in-progress episode for that series is known:
+  - render `▶ Resume Sx Ex`
+  - wire it directly to `PlayerActivity`
+  - pass `EXTRA_ASIN`, `EXTRA_TITLE`, `EXTRA_CONTENT_TYPE`, and `EXTRA_RESUME_MS`
+
+**Selection rule**:
+- prefer the most recently progressed episode if that can be inferred
+- otherwise prefer the furthest-progress episode for the series
+
+### Small supporting improvement
+
+#### Repository freshness TTL
+
+Keep the current server-first merge policy, but allow lightweight refresh on long-lived sessions:
+- if Home resumes after a small TTL (for example 5-10 minutes), refresh progress
+- otherwise reuse in-memory repository state
+
+This is intentionally not a background sync feature.
+
+### Out of scope
+
+- full metadata repository / offline content cache
+- true timestamp-based conflict resolution
+- background worker for progress sync
+- broader player redesign beyond scrub preview
+
+### Recommended implementation order
+
+1. Investigate trick-play metadata in `GetPlaybackResources` / MPD
+2. Add thumbnail fields to `PlaybackInfo`
+3. Implement player scrub preview overlay
+4. Fix parent-series identity on progress-backed items
+5. Implement series detail resume CTA
+6. Add simple repository TTL
+
+### Definition of done
+
+- thumbnail preview appears above the seekbar for titles with trick-play metadata
+- no preview is shown, and no errors occur, for titles without trick-play metadata
+- preview hides in sync with player controls
+- series detail pages can show `Resume Episode` when in-progress episode data exists
+- `Resume Episode` starts the correct episode with the correct resume position
+- `./gradlew assembleRelease` passes

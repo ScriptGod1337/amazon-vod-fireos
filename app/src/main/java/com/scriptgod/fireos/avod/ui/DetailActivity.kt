@@ -18,6 +18,7 @@ import com.scriptgod.fireos.avod.R
 import com.scriptgod.fireos.avod.api.AmazonApiService
 import com.scriptgod.fireos.avod.auth.AmazonAuthService
 import com.scriptgod.fireos.avod.data.ProgressRepository
+import com.scriptgod.fireos.avod.model.ContentItem
 import com.scriptgod.fireos.avod.model.DetailInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -255,7 +256,18 @@ class DetailActivity : AppCompatActivity() {
                     btnSeasons.setOnClickListener { onAllSeasonsClicked(info) }
                 }
             } else {
-                // Series overview → Browse Seasons
+                // Series overview → Resume Episode (if in progress) + Browse Seasons
+                val resumeEpisode = ProgressRepository.getInProgressItems()
+                    .filter { it.seriesAsin == info.asin }
+                    .maxByOrNull { it.watchProgressMs }
+                if (resumeEpisode != null) {
+                    val label = if (resumeEpisode.seasonNumber != null && resumeEpisode.episodeNumber != null)
+                        "▶  Resume S${resumeEpisode.seasonNumber}E${resumeEpisode.episodeNumber}"
+                    else "▶  Resume Episode"
+                    btnPlay.text = label
+                    btnPlay.visibility = View.VISIBLE
+                    btnPlay.setOnClickListener { onResumeEpisodeClicked(resumeEpisode) }
+                }
                 btnBrowse.text = "Browse Seasons"
                 btnBrowse.visibility = View.VISIBLE
                 btnBrowse.setOnClickListener { onBrowseClicked(info) }
@@ -363,6 +375,17 @@ class DetailActivity : AppCompatActivity() {
                 PlayerActivity.EXTRA_RESUME_MS,
                 ProgressRepository.get(info.asin)?.positionMs?.coerceAtLeast(0L) ?: 0L
             )
+        }
+        UiTransitions.open(this, intent)
+    }
+
+    private fun onResumeEpisodeClicked(episode: ContentItem) {
+        val resumeMs = ProgressRepository.get(episode.asin)?.positionMs?.coerceAtLeast(0L) ?: 0L
+        val intent = Intent(this, PlayerActivity::class.java).apply {
+            putExtra(PlayerActivity.EXTRA_ASIN, episode.asin)
+            putExtra(PlayerActivity.EXTRA_TITLE, episode.title)
+            putExtra(PlayerActivity.EXTRA_CONTENT_TYPE, episode.contentType)
+            putExtra(PlayerActivity.EXTRA_RESUME_MS, resumeMs)
         }
         UiTransitions.open(this, intent)
     }

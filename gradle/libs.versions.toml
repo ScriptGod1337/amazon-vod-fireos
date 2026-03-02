@@ -33,6 +33,7 @@ gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 coil = { group = "io.coil-kt", name = "coil", version.ref = "coil" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+androidx-cardview = { group = "androidx.cardview", name = "cardview", version = "1.0.0" }
 shimmer = { group = "com.facebook.shimmer", name = "shimmer", version.ref = "shimmer" }
 junit4 = { group = "junit", name = "junit", version.ref = "junit4" }
 

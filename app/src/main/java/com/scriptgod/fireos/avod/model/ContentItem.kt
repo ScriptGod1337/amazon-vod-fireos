@@ -86,5 +86,15 @@ data class PlaybackInfo(
     val licenseUrl: String,
     val asin: String,
     val subtitleTracks: List<SubtitleTrack> = emptyList(),
-    val audioTracks: List<AudioTrack> = emptyList()
-)
+    val audioTracks: List<AudioTrack> = emptyList(),
+    // Trick-play thumbnail metadata; all zero/empty when no image track found in the MPD.
+    val thumbnailTrackUrl: String = "",  // URL template — $Number$ replaced with segment index
+    val frameIntervalSec: Int = 0,       // content seconds represented by each frame/segment
+    val spriteColumns: Int = 1,          // frames per row in a sprite-sheet segment
+    val spriteRows: Int = 1,             // rows per sprite-sheet segment
+    val frameWidthPx: Int = 0,           // individual frame width in pixels
+    val frameHeightPx: Int = 0           // individual frame height in pixels
+) {
+    val hasThumbnails: Boolean
+        get() = thumbnailTrackUrl.isNotEmpty() && frameIntervalSec > 0 && frameWidthPx > 0
+}

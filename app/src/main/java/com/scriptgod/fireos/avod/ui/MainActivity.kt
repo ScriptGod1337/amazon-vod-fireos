@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity() {
     private var unfilteredRails: List<ContentRail> = emptyList()
     private var featuredHomeItem: ContentItem? = null
     private var localOnlyContinueWatchingItems: List<ContentItem> = emptyList()
+    private var lastProgressRefreshMs: Long = 0L
 
     // Two independent filter dimensions
     private var sourceFilter: String = "all"   // "all" or "prime"
@@ -895,6 +896,7 @@ class MainActivity : AppCompatActivity() {
             contentType = info.contentType,
             kind = kind,
             isPrime = info.isPrime,
+            seriesAsin = info.showAsin,
             isInWatchlist = watchlistAsins.contains(info.asin) || info.isInWatchlist,
             runtimeMs = if (info.runtimeSeconds > 0) info.runtimeSeconds * 1000L else progress.runtimeMs,
             watchProgressMs = progress.positionMs
@@ -1158,8 +1160,33 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Rebuild visible content from the centralized progress repository when returning
-        // from playback so progress bars update without a server refresh.
+
+        // TTL: if home has been dormant > 10 min, background-refresh progress from the server
+        // so that watches on other devices show up without requiring an app restart.
+        val now = System.currentTimeMillis()
+        if (now - lastProgressRefreshMs > 10 * 60_000L && unfilteredRails.isNotEmpty()) {
+            lastProgressRefreshMs = now
+            lifecycleScope.launch {
+                try {
+                    withContext(Dispatchers.IO) { ProgressRepository.refresh(apiService) }
+                    // Re-render after the refresh completes
+                    if (isRailsMode) {
+                        unfilteredRails = unfilteredRails.map { rail ->
+                            rail.copy(items = rail.items.map(::withRepositoryProgress))
+                        }
+                        val filtered = applyAllFiltersToRails(unfilteredRails)
+                        val cwRail = buildContinueWatchingRail()
+                        val displayList = if (cwRail != null) listOf(cwRail) + filtered else filtered
+                        updateHomeFeaturedStrip(displayList)
+                        railsAdapter.submitList(displayList)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "TTL progress refresh failed", e)
+                }
+            }
+        }
+
+        // Immediate synchronous update from in-memory repository state.
         if (isRailsMode && unfilteredRails.isNotEmpty()) {
             unfilteredRails = unfilteredRails.map { rail -> rail.copy(items = rail.items.map(::withRepositoryProgress)) }
             val filtered = applyAllFiltersToRails(unfilteredRails)
