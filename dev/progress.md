@@ -1896,7 +1896,7 @@ P0 and P1 fixes are planned for the next phase alongside the seekbar thumbnail f
 
 ---
 
-## Phase 33: PLANNED — Player Scrub Preview + Series Resume
+## Phase 33: COMPLETE — Player Scrub Preview + Series Resume
 
 ### Goal
 
@@ -2047,3 +2047,60 @@ This is intentionally not a background sync feature.
 - series detail pages can show `Resume Episode` when in-progress episode data exists
 - `Resume Episode` starts the correct episode with the correct resume position
 - `./gradlew assembleRelease` passes
+
+---
+
+## Phase 33 implementation notes
+
+### Part A — Seekbar scrub thumbnail preview (BIF)
+
+**Root cause discovery**: `parseThumbnailTrack()` looked for DASH image adaptation sets,
+but Amazon does not embed thumbnail tracks in the MPD. Decompiled APK smali revealed the
+real mechanism: `TrickplayPlugin$DownloadBifFileFromUrl` + `Resource` enum value
+`"TrickplayUrls"`.
+
+**Solution**:
+- Added `TrickplayUrls` to `desiredResources` in `GetPlaybackResources`
+- `AmazonApiService.extractBifUrl()` parses `trickplayUrls.trickplayUrlsCdnSets[].trickplayUrlInfoList[]`, prefers 480p
+- `PlaybackInfo.bifUrl` replaces the old sprite-sheet fields
+- `PlayerActivity.loadBifIndex()` downloads BIF header+index (64 B header, then N+1 × 8 B index) via HTTP Range
+- `PlayerActivity.showThumbnailAt()` binary-searches the index and range-fetches individual JPEG frames on demand; LRU-caches up to 10 frames
+- D-pad LEFT/RIGHT accumulates `seekPreviewPos` and shows the thumbnail overlay; `dpadSeekHandler` hides it 1.5 s after the last key press
+- Confirmed working on device (user: "works")
+
+**Commits**: f8d43b5
+
+### Part B — Series resume shortcut + post-ship review fixes
+
+**Series resume CTA** (`DetailActivity`):
+- `updateSeriesResumeCta(info)` helper checks server-backed `getInProgressItems()` first,
+  falls back to `getLocalProgressForSeries()` for episodes watched but not yet server-refreshed
+- Called from both `bindDetailInfo()` and `onResume()` so the CTA appears immediately on
+  return from playback
+- Button shows `▶  Resume SxEx` when season/episode numbers are available; generic
+  `▶  Resume Episode` for local-only entries where metadata is absent
+
+**ProgressRepository changes**:
+- `ProgressEntry` gains `seriesAsin: String = ""` (Gson-backward-compatible)
+- `update()` accepts optional `seriesAsin`; stored per entry
+- `getLocalProgressForSeries(seriesAsin)` returns the highest-positionMs local entry
+
+**PlayerActivity / BrowseActivity**:
+- `EXTRA_SERIES_ASIN` constant; read on startup; threaded through to every `update()` call
+- `BrowseActivity` passes `item.seriesAsin` when launching episodes
+
+**TTL refresh flat-grid fix** (`MainActivity`):
+- TTL coroutine now has `else if (adapter.currentList.isNotEmpty())` branch so Watchlist /
+  Library / search results are also rebound after the async server refresh
+
+**Commits**: 3ab9b56
+
+### Definition of done — verified
+
+- ✅ Thumbnail preview appears above seekbar for titles with trick-play metadata
+- ✅ No preview shown (no errors) for titles without trick-play metadata
+- ✅ Preview hides in sync with player controls (1.5 s dpad idle)
+- ✅ Series detail pages show `Resume Episode` CTA for in-progress episodes (server + local)
+- ✅ `Resume Episode` starts correct episode with correct resume position
+- ✅ `./gradlew assembleRelease` passes
+- ✅ TTL refresh updates flat-grid surfaces (Watchlist, Library, search)
