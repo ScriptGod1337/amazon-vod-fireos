@@ -11,3 +11,5 @@ Full build instructions and phased development plan are in `dev/CLAUDE.md`.
 - API analysis: `dev/analysis/`
 - Build log: `dev/progress.md`
 - Code review guide: `dev/REVIEW.md`
+- Emulator: default for testing
+- FireTV (real device): 192.168.0.12
