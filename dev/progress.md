@@ -2104,3 +2104,33 @@ real mechanism: `TrickplayPlugin$DownloadBifFileFromUrl` + `Resource` enum value
 - ✅ `Resume Episode` starts correct episode with correct resume position
 - ✅ `./gradlew assembleRelease` passes
 - ✅ TTL refresh updates flat-grid surfaces (Watchlist, Library, search)
+
+---
+
+## Phase 34: Playback Completion Behaviour — COMPLETE (2026-03-02)
+
+### What was built
+
+- `PlayerActivity`: new `EXTRA_SEASON_ASIN` constant and `currentSeasonAsin` field; reads season ASIN from intent on `onCreate`; `STATE_ENDED` now calls `onPlaybackCompleted()`
+- `onPlaybackCompleted()`: trailers and movies (no season context) call `finish()`; episodes fetch the season's episode list via `getDetailPage`, binary-search for the current episode, and auto-play the next one if it exists; last episode of season calls `finish()`
+- `BrowseActivity`: passes `item.seasonId` as `EXTRA_SEASON_ASIN` when launching player for an episode
+- `DetailActivity.onResumeEpisodeClicked()`: passes `episode.seasonId` as `EXTRA_SEASON_ASIN`
+
+### Edge cases handled
+
+| Scenario | Outcome |
+|----------|---------|
+| Trailer ends | `finish()` |
+| Movie ends | `finish()` |
+| Episode ends, next exists | auto-play next episode |
+| Last episode of season | `finish()` → returns to season BrowseActivity |
+| API lookup fails | `finish()` (safe fallback) |
+| Next episode partially watched | resumes from ProgressRepository |
+| User presses Back during API call | coroutine cancelled in `onDestroy`, no crash |
+
+### Definition of done — verified
+
+- ✅ `./gradlew assembleRelease` passes, no new warnings
+- ✅ Movie ends → `finish()` confirmed on device (logcat: `onPlaybackCompleted → finish (no season/trailer)`)
+- ✅ Episode ends → next episode auto-plays confirmed on device (logcat: `onPlaybackCompleted → auto-play next episode`, `loadAndPlay` called with new ASIN, same season ASIN)
+- Note: `item.seasonId` is empty for episodes listed in BrowseActivity; fixed by storing `browseAsin` as class field and using it as fallback when `currentFilter == "episodes"`

@@ -705,6 +705,8 @@ class MainActivity : AppCompatActivity() {
             putExtra(PlayerActivity.EXTRA_TITLE, item.title)
             putExtra(PlayerActivity.EXTRA_CONTENT_TYPE, item.contentType)
             putExtra(PlayerActivity.EXTRA_RESUME_MS, item.watchProgressMs.coerceAtLeast(0L))
+            if (item.seriesAsin.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SERIES_ASIN, item.seriesAsin)
+            if (item.seasonId.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SEASON_ASIN, item.seasonId)
         }
         UiTransitions.open(this, intent)
     }
@@ -825,13 +827,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildContinueWatchingRail(): ContentRail? {
-        val cwItems = ProgressRepository.getInProgressItems().toMutableList()
+        // Apply current local progress to every candidate so that items finished during
+        // this session (positionMs == -1L) are excluded even before the next server refresh.
+        val cwItems = ProgressRepository.getInProgressItems()
+            .map(::withRepositoryProgress)
+            .filter { it.watchProgressMs > 0 }
+            .toMutableList()
         val seenAsins = cwItems.mapTo(HashSet()) { it.asin }
 
         for (item in localOnlyContinueWatchingItems) {
-            if (item.asin !in seenAsins) {
-                cwItems.add(item)
-                seenAsins.add(item.asin)
+            val current = withRepositoryProgress(item)
+            if (current.asin !in seenAsins && current.watchProgressMs > 0) {
+                cwItems.add(current)
+                seenAsins.add(current.asin)
             }
         }
 
@@ -908,7 +916,8 @@ class MainActivity : AppCompatActivity() {
         return item.copy(
             isInWatchlist = watchlistAsins.contains(item.asin),
             watchProgressMs = progress?.positionMs ?: item.watchProgressMs,
-            runtimeMs = progress?.runtimeMs ?: item.runtimeMs
+            runtimeMs = progress?.runtimeMs ?: item.runtimeMs,
+            seasonId = item.seasonId.ifEmpty { progress?.seasonAsin ?: "" }
         )
     }
 

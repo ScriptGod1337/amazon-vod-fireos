@@ -381,6 +381,7 @@ class DetailActivity : AppCompatActivity() {
             putExtra(PlayerActivity.EXTRA_CONTENT_TYPE, episode.contentType)
             putExtra(PlayerActivity.EXTRA_RESUME_MS, resumeMs)
             if (episode.seriesAsin.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SERIES_ASIN, episode.seriesAsin)
+            if (episode.seasonId.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SEASON_ASIN, episode.seasonId)
         }
         UiTransitions.open(this, intent)
     }
@@ -398,7 +399,8 @@ class DetailActivity : AppCompatActivity() {
                 title = "Episode",
                 contentType = "Episode",
                 watchProgressMs = local.second.positionMs,
-                seriesAsin = info.asin
+                seriesAsin = info.asin,
+                seasonId = local.second.seasonAsin
             )
         }
         if (resumeEpisode != null) {

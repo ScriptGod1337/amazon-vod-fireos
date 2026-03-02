@@ -56,6 +56,7 @@ class BrowseActivity : AppCompatActivity() {
     private var watchlistAsins: MutableSet<String> = mutableSetOf()
     private var preferHeaderFocus: Boolean = false
     private var currentFilter: String? = null
+    private var browseAsin: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,6 +88,7 @@ class BrowseActivity : AppCompatActivity() {
         btnBack.setOnClickListener { UiTransitions.close(this) }
 
         val asin = intent.getStringExtra(EXTRA_ASIN) ?: return
+        browseAsin = asin
         val title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         val contentType = intent.getStringExtra(EXTRA_CONTENT_TYPE) ?: ""
         parentImageUrl = intent.getStringExtra(EXTRA_IMAGE_URL) ?: ""
@@ -399,6 +401,13 @@ class BrowseActivity : AppCompatActivity() {
                     putExtra(PlayerActivity.EXTRA_CONTENT_TYPE, item.contentType)
                     putExtra(PlayerActivity.EXTRA_RESUME_MS, item.watchProgressMs.coerceAtLeast(0L))
                     if (item.seriesAsin.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SERIES_ASIN, item.seriesAsin)
+                    // Pass season ASIN so onPlaybackCompleted() can auto-advance to next episode.
+                    // Prefer item.seasonId (server-provided); fall back to browseAsin when
+                    // BrowseActivity is showing the episode list for a known season.
+                    val seasonAsin = item.seasonId.ifEmpty {
+                        if (currentFilter == "episodes") browseAsin else ""
+                    }
+                    if (seasonAsin.isNotEmpty()) putExtra(PlayerActivity.EXTRA_SEASON_ASIN, seasonAsin)
                 }
                 UiTransitions.open(this, intent)
             }

@@ -44,6 +44,7 @@ import com.scriptgod.fireos.avod.auth.AmazonAuthService
 import com.scriptgod.fireos.avod.data.ProgressRepository
 import com.scriptgod.fireos.avod.drm.AmazonLicenseService
 import com.scriptgod.fireos.avod.model.AudioTrack
+import com.scriptgod.fireos.avod.model.ContentKind
 import com.scriptgod.fireos.avod.model.PlaybackInfo
 import com.scriptgod.fireos.avod.model.PlaybackQuality
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +73,7 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_MATERIAL_TYPE = "extra_material_type"
         const val EXTRA_RESUME_MS = "extra_resume_ms"
         const val EXTRA_SERIES_ASIN = "extra_series_asin"
+        const val EXTRA_SEASON_ASIN = "extra_season_asin"
         private val CHANNEL_SUFFIX_REGEX = Regex("""\s+\d\.\d(\s*(surround|atmos))?""", RegexOption.IGNORE_CASE)
 
         // Widevine UUID
@@ -105,6 +107,7 @@ class PlayerActivity : AppCompatActivity() {
     private var playbackJob: Job? = null
     private var currentAsin: String = ""
     private var currentSeriesAsin: String = ""
+    private var currentSeasonAsin: String = ""
     private var currentMaterialType: String = "Feature"
     private var currentQuality: PlaybackQuality = PlaybackQuality.HD
     private var h265FallbackAttempted: Boolean = false
@@ -268,6 +271,7 @@ class PlayerActivity : AppCompatActivity() {
             ?: run { showError("No ASIN provided"); return }
         currentAsin = asin
         currentSeriesAsin = intent.getStringExtra(EXTRA_SERIES_ASIN) ?: ""
+        currentSeasonAsin = intent.getStringExtra(EXTRA_SEASON_ASIN) ?: ""
 
         val tokenFile = LoginActivity.findTokenFile(this)
             ?: run { finish(); return }
@@ -363,6 +367,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun loadAndPlay(asin: String, materialType: String = "Feature", qualityOverride: PlaybackQuality? = null) {
+        Log.w(TAG, "loadAndPlay asin=$asin type=$materialType season=$currentSeasonAsin")
         progressBar.visibility = View.VISIBLE
         tvError.visibility = View.GONE
         tvVideoFormat.text = ""   // clear stale label until new player reports its format
@@ -403,6 +408,9 @@ class PlayerActivity : AppCompatActivity() {
      */
     private fun setupPlayer(info: PlaybackInfo) {
         if (isDestroyed || isFinishing) return
+        player?.removeListener(playerListener)
+        player?.release()
+        player = null
         val licenseCallback = AmazonLicenseService(authService, info.licenseUrl)
 
         val drmSessionManager = DefaultDrmSessionManager.Builder()
@@ -585,9 +593,11 @@ class PlayerActivity : AppCompatActivity() {
                     }
                 }
                 Player.STATE_ENDED -> {
+                    persistPlaybackProgress(force = true)
                     stopStreamReporting()
                     stopResumeProgressUpdates()
                     updatePlaybackWakeState(false)
+                    onPlaybackCompleted()
                 }
                 Player.STATE_IDLE -> updatePlaybackWakeState(false)
             }
@@ -716,6 +726,47 @@ class PlayerActivity : AppCompatActivity() {
         playerView.removeCallbacks(resumeProgressRunnable)
     }
 
+    private fun onPlaybackCompleted() {
+        Log.w(TAG, "onPlaybackCompleted asin=$currentAsin type=$currentMaterialType season=$currentSeasonAsin")
+        // Trailers and non-episode content (no season context): just close.
+        if (currentMaterialType == "Trailer" || currentSeasonAsin.isEmpty()) {
+            Log.w(TAG, "onPlaybackCompleted → finish (no season/trailer)")
+            finish()
+            return
+        }
+        // Episode: find and auto-play the next episode in the same season.
+        scope.launch {
+            val next = withContext(Dispatchers.IO) {
+                try {
+                    apiService.getDetailPage(currentSeasonAsin)
+                        .filter { it.kind == ContentKind.EPISODE }
+                        .sortedWith(compareBy({ it.seasonNumber ?: 0 }, { it.episodeNumber ?: 0 }))
+                        .let { eps ->
+                            val idx = eps.indexOfFirst { it.asin == currentAsin }
+                            if (idx >= 0) eps.getOrNull(idx + 1) else null
+                        }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Next-episode lookup failed", e)
+                    null
+                }
+            }
+            if (next == null) {
+                Log.w(TAG, "onPlaybackCompleted → finish (no next episode)")
+                finish()   // end of season or lookup error → return to season view
+                return@launch
+            }
+            Log.w(TAG, "onPlaybackCompleted → auto-play next episode ${next.asin}")
+            // Update per-episode state before re-using loadAndPlay.
+            currentAsin = next.asin
+            watchSessionId = UUID.randomUUID().toString()
+            // Clear the stale intent resume so loadAndPlay falls back to
+            // ProgressRepository (respects prior partial progress on the next ep).
+            intent.putExtra(EXTRA_RESUME_MS, 0L)
+            tvPlaybackTitle.text = next.title
+            loadAndPlay(next.asin, currentMaterialType)
+        }
+    }
+
     private fun sendProgressEvent(event: String) {
         val positionSecs = currentPositionSecs()
         persistPlaybackProgress(force = event != "PLAY")
@@ -756,7 +807,7 @@ class PlayerActivity : AppCompatActivity() {
         val posMs = p.currentPosition
         if (!force && posMs <= 0L) return
         if (!force && posMs - lastResumeSaveElapsedMs < 25_000L) return
-        ProgressRepository.update(currentAsin, posMs, p.duration, currentMaterialType, currentSeriesAsin)
+        ProgressRepository.update(currentAsin, posMs, p.duration, currentMaterialType, currentSeriesAsin, currentSeasonAsin)
         lastResumeSaveElapsedMs = posMs
     }
 

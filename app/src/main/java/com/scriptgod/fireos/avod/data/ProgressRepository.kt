@@ -17,7 +17,8 @@ object ProgressRepository {
     data class ProgressEntry(
         val positionMs: Long,
         val runtimeMs: Long,
-        val seriesAsin: String = ""
+        val seriesAsin: String = "",
+        val seasonAsin: String = ""
     )
 
     private val gson = Gson()
@@ -65,13 +66,13 @@ object ProgressRepository {
         return watchlistAsins
     }
 
-    fun update(asin: String, posMs: Long, durMs: Long, materialType: String = "Feature", seriesAsin: String = "") {
+    fun update(asin: String, posMs: Long, durMs: Long, materialType: String = "Feature", seriesAsin: String = "", seasonAsin: String = "") {
         ensureInitialized()
         if (materialType == "Trailer") return
         if (asin.isBlank() || posMs <= 0L) return
         synchronized(this) {
             val normalizedPos = if (durMs > 0L && posMs >= durMs * 9 / 10) -1L else posMs
-            progressMap[asin] = ProgressEntry(normalizedPos, durMs.coerceAtLeast(0L), seriesAsin)
+            progressMap[asin] = ProgressEntry(normalizedPos, durMs.coerceAtLeast(0L), seriesAsin, seasonAsin)
             persistAll()
         }
     }
