@@ -121,6 +121,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var cardSeekThumbnail: androidx.cardview.widget.CardView
     private lateinit var ivSeekThumbnail: android.widget.ImageView
     private val thumbnailCache = android.util.LruCache<String, android.graphics.Bitmap>(8)
+    private val dpadSeekHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val hideThumbnailRunnable = Runnable { hideThumbnail() }
     private val hideTrackButtonsRunnable = Runnable {
         trackButtons.clearFocus()
         trackButtons.visibility = View.GONE
@@ -1358,6 +1360,25 @@ class PlayerActivity : AppCompatActivity() {
             .show()
     }
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+            playerView.isControllerFullyVisible) {
+            // Compute seek target before super.dispatchKeyEvent() so ExoPlayer's async
+            // position update doesn't cause us to read the pre-seek value.
+            val cur = player?.currentPosition ?: 0L
+            val dur = player?.duration ?: Long.MAX_VALUE
+            val targetPos = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
+                minOf(cur + 10_000L, dur) else maxOf(cur - 10_000L, 0L)
+            val result = super.dispatchKeyEvent(event)
+            dpadSeekHandler.removeCallbacks(hideThumbnailRunnable)
+            dpadSeekHandler.post { showThumbnailAt(targetPos) }
+            dpadSeekHandler.postDelayed(hideThumbnailRunnable, 1500L)
+            return result
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_MENU) {
             // Toggle both the player controller and trackButtons (synced via listener)
@@ -1468,6 +1489,7 @@ class PlayerActivity : AppCompatActivity() {
         scopeJob.cancel()
         trackButtons.removeCallbacks(syncTrackButtonsRunnable)
         trackButtons.removeCallbacks(hideTrackButtonsRunnable)
+        dpadSeekHandler.removeCallbacksAndMessages(null)
         stopResumeProgressUpdates()
         updatePlaybackWakeState(false)
         player?.release()
