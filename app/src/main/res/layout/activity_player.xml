@@ -161,7 +161,7 @@
     <androidx.cardview.widget.CardView
         android:id="@+id/card_seek_thumbnail"
         android:layout_width="160dp"
-        android:layout_height="wrap_content"
+        android:layout_height="100dp"
         android:layout_gravity="bottom|center_horizontal"
         android:layout_marginBottom="72dp"
         android:visibility="gone"
@@ -169,30 +169,31 @@
         app:cardCornerRadius="6dp"
         app:cardElevation="4dp">
 
-        <LinearLayout
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical">
+            android:layout_height="match_parent">
 
+            <!-- Transparent until a sprite-sheet bitmap is loaded; CardView dark
+                 background shows through, acting as a visual placeholder. -->
             <ImageView
                 android:id="@+id/iv_seek_thumbnail"
                 android:layout_width="match_parent"
-                android:layout_height="90dp"
-                android:scaleType="centerCrop"
-                android:visibility="gone" />
+                android:layout_height="match_parent"
+                android:layout_marginBottom="22dp"
+                android:scaleType="centerCrop" />
 
             <TextView
                 android:id="@+id/tv_seek_time"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="22dp"
+                android:layout_gravity="bottom"
                 android:gravity="center"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp"
                 android:textColor="#FFFFFF"
                 android:textSize="13sp"
-                android:textStyle="bold" />
+                android:textStyle="bold"
+                android:background="#99000000" />
 
-        </LinearLayout>
+        </FrameLayout>
 
     </androidx.cardview.widget.CardView>
 

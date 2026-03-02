@@ -775,7 +775,6 @@ class PlayerActivity : AppCompatActivity() {
         val cached = thumbnailCache.get(url)
         if (cached != null) {
             ivSeekThumbnail.setImageBitmap(cropFrame(cached, col, row, info.frameWidthPx, info.frameHeightPx))
-            ivSeekThumbnail.visibility = View.VISIBLE
             return
         }
 
@@ -789,10 +788,7 @@ class PlayerActivity : AppCompatActivity() {
                     ?: return@launch
                 thumbnailCache.put(url, sheet)
                 val frame = cropFrame(sheet, col, row, info.frameWidthPx, info.frameHeightPx)
-                withContext(Dispatchers.Main) {
-                    ivSeekThumbnail.setImageBitmap(frame)
-                    ivSeekThumbnail.visibility = View.VISIBLE
-                }
+                withContext(Dispatchers.Main) { ivSeekThumbnail.setImageBitmap(frame) }
             } catch (e: Exception) {
                 Log.w(TAG, "Thumbnail load failed: $url", e)
             }
@@ -810,7 +806,6 @@ class PlayerActivity : AppCompatActivity() {
     private fun hideThumbnail() {
         seekPreviewPos = -1L
         cardSeekThumbnail.visibility = View.GONE
-        ivSeekThumbnail.visibility = View.GONE
         ivSeekThumbnail.setImageBitmap(null)
     }
 
