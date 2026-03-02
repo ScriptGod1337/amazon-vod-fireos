@@ -124,6 +124,8 @@ class PlayerActivity : AppCompatActivity() {
     private val thumbnailCache = android.util.LruCache<String, android.graphics.Bitmap>(8)
     private val dpadSeekHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val hideThumbnailRunnable = Runnable { hideThumbnail() }
+    /** Accumulated seek-preview position; -1 means not currently seeking. */
+    private var seekPreviewPos: Long = -1L
     private val hideTrackButtonsRunnable = Runnable {
         trackButtons.clearFocus()
         trackButtons.visibility = View.GONE
@@ -773,6 +775,7 @@ class PlayerActivity : AppCompatActivity() {
         val cached = thumbnailCache.get(url)
         if (cached != null) {
             ivSeekThumbnail.setImageBitmap(cropFrame(cached, col, row, info.frameWidthPx, info.frameHeightPx))
+            ivSeekThumbnail.visibility = View.VISIBLE
             return
         }
 
@@ -786,7 +789,10 @@ class PlayerActivity : AppCompatActivity() {
                     ?: return@launch
                 thumbnailCache.put(url, sheet)
                 val frame = cropFrame(sheet, col, row, info.frameWidthPx, info.frameHeightPx)
-                withContext(Dispatchers.Main) { ivSeekThumbnail.setImageBitmap(frame) }
+                withContext(Dispatchers.Main) {
+                    ivSeekThumbnail.setImageBitmap(frame)
+                    ivSeekThumbnail.visibility = View.VISIBLE
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Thumbnail load failed: $url", e)
             }
@@ -802,7 +808,9 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun hideThumbnail() {
+        seekPreviewPos = -1L
         cardSeekThumbnail.visibility = View.GONE
+        ivSeekThumbnail.visibility = View.GONE
         ivSeekThumbnail.setImageBitmap(null)
     }
 
@@ -1368,15 +1376,17 @@ class PlayerActivity : AppCompatActivity() {
         if (event.action == KeyEvent.ACTION_DOWN &&
             (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
             playerView.isControllerFullyVisible) {
-            // Compute seek target before super.dispatchKeyEvent() so ExoPlayer's async
-            // position update doesn't cause us to read the pre-seek value.
-            val cur = player?.currentPosition ?: 0L
-            val dur = player?.duration ?: Long.MAX_VALUE
-            val targetPos = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
-                minOf(cur + 10_000L, dur) else maxOf(cur - 10_000L, 0L)
+            // Accumulate seek position ourselves — player.currentPosition is updated
+            // asynchronously by ExoPlayer and won't reflect the seek target in time for
+            // rapid successive key presses.
+            val dur = player?.duration?.takeIf { it > 0 } ?: Long.MAX_VALUE
+            if (seekPreviewPos < 0) seekPreviewPos = player?.currentPosition ?: 0L
+            seekPreviewPos = if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
+                minOf(seekPreviewPos + 10_000L, dur) else maxOf(seekPreviewPos - 10_000L, 0L)
+            val previewPos = seekPreviewPos
             val result = super.dispatchKeyEvent(event)
             dpadSeekHandler.removeCallbacks(hideThumbnailRunnable)
-            dpadSeekHandler.post { showThumbnailAt(targetPos) }
+            dpadSeekHandler.post { showThumbnailAt(previewPos) }
             dpadSeekHandler.postDelayed(hideThumbnailRunnable, 1500L)
             return result
         }
