@@ -121,7 +121,9 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var cardSeekThumbnail: androidx.cardview.widget.CardView
     private lateinit var ivSeekThumbnail: android.widget.ImageView
     private lateinit var tvSeekTime: android.widget.TextView
-    private val thumbnailCache = android.util.LruCache<String, android.graphics.Bitmap>(8)
+    /** BIF index: list of (timecodeMs, byteOffset) pairs loaded once per playback session. */
+    private var bifEntries: List<Pair<Long, Int>>? = null
+    private val thumbCache = android.util.LruCache<Int, android.graphics.Bitmap>(10)
     private val dpadSeekHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val hideThumbnailRunnable = Runnable { hideThumbnail() }
     /** Accumulated seek-preview position; -1 means not currently seeking. */
@@ -383,6 +385,7 @@ class PlayerActivity : AppCompatActivity() {
                 .distinctBy { "${it.displayName}|${it.languageCode}|${it.type}|${it.index}" }
             logAvailableAudioTracks("Merged audio metadata", availableAudioTracks)
             currentPlaybackInfo = info
+            if (info.bifUrl.isNotEmpty()) loadBifIndex(info.bifUrl)
             setupPlayer(info)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch playback info: ${e.message}", e)
@@ -754,8 +757,64 @@ class PlayerActivity : AppCompatActivity() {
         lastResumeSaveElapsedMs = posMs
     }
 
+    /**
+     * Downloads and parses the BIF file header + index table so individual frames can be
+     * fetched on demand via HTTP Range requests while the user scrubs.
+     *
+     * BIF header (64 bytes total):
+     *   bytes 0-7:   magic
+     *   bytes 8-11:  version (uint32 LE)
+     *   bytes 12-15: image count (uint32 LE)
+     *   bytes 16-19: timecode multiplier in ms (uint32 LE; e.g. 1000 = 1 frame/sec)
+     *   bytes 20-63: reserved
+     * BIF index starts at byte 64: N+1 entries of (uint32 timestamp, uint32 byteOffset),
+     * terminated by (0xFFFFFFFF, totalFileSize).
+     */
+    private fun loadBifIndex(bifUrl: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                // Fetch header to get image count and timecode multiplier.
+                val headerBytes = bifRangeGet(bifUrl, 0, 63) ?: return@launch
+                if (headerBytes.size < 20) return@launch
+                val buf = java.nio.ByteBuffer.wrap(headerBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                buf.position(8)  // skip magic
+                buf.int          // skip version
+                val imageCount = buf.int
+                val multiplier = buf.int.toLong().coerceAtLeast(1L)
+                if (imageCount <= 0 || imageCount > 100_000) return@launch
+
+                // Fetch the index table (N+1 entries × 8 bytes each).
+                val indexStart = 64L
+                val indexBytes = bifRangeGet(bifUrl, indexStart, indexStart + (imageCount + 1) * 8 - 1)
+                    ?: return@launch
+                val idxBuf = java.nio.ByteBuffer.wrap(indexBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val entries = ArrayList<Pair<Long, Int>>(imageCount)
+                for (i in 0..imageCount) {
+                    val ts = idxBuf.int.toLong() and 0xFFFFFFFFL
+                    val off = idxBuf.int
+                    if (ts == 0xFFFFFFFFL) break
+                    entries.add(Pair(ts * multiplier, off))
+                }
+                Log.i(TAG, "BIF index loaded: ${entries.size} frames, multiplier=${multiplier}ms")
+                withContext(Dispatchers.Main) { bifEntries = entries }
+            } catch (e: Exception) {
+                Log.w(TAG, "BIF index load failed", e)
+            }
+        }
+    }
+
+    private fun bifRangeGet(url: String, from: Long, to: Long): ByteArray? {
+        return try {
+            val req = okhttp3.Request.Builder()
+                .url(url)
+                .header("Range", "bytes=$from-$to")
+                .get().build()
+            okhttp3.OkHttpClient().newCall(req).execute().body?.bytes()
+        } catch (e: Exception) { null }
+    }
+
     private fun showThumbnailAt(posMs: Long) {
-        // Always show the time label so the user gets seek feedback even without a thumbnail track.
+        // Always show the time label so the user gets seek feedback even without a BIF track.
         val totalSec = posMs / 1000L
         val h = totalSec / 3600; val m = (totalSec % 3600) / 60; val s = totalSec % 60
         tvSeekTime.text = if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
@@ -763,44 +822,35 @@ class PlayerActivity : AppCompatActivity() {
 
         val info = currentPlaybackInfo ?: return
         if (!info.hasThumbnails) return
+        val entries = bifEntries ?: return
+        if (entries.isEmpty()) return
 
-        val framesPerSheet = info.spriteColumns * info.spriteRows
-        val totalFrame = (posMs / 1000L / info.frameIntervalSec).toInt()
-        val segmentNumber = (totalFrame / framesPerSheet) + 1
-        val frameInSheet = totalFrame % framesPerSheet
-        val col = frameInSheet % info.spriteColumns
-        val row = frameInSheet / info.spriteColumns
-        val url = info.thumbnailTrackUrl.replace("\$Number\$", segmentNumber.toString())
-
-        val cached = thumbnailCache.get(url)
-        if (cached != null) {
-            ivSeekThumbnail.setImageBitmap(cropFrame(cached, col, row, info.frameWidthPx, info.frameHeightPx))
-            return
+        // Binary search: largest timecodeMs <= posMs.
+        var lo = 0; var hi = entries.size - 1
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (entries[mid].first <= posMs) lo = mid else hi = mid - 1
         }
+        val idx = lo
+
+        val cached = thumbCache.get(idx)
+        if (cached != null) { ivSeekThumbnail.setImageBitmap(cached); return }
+
+        val fromOffset = entries[idx].second.toLong()
+        val toOffset = if (idx + 1 < entries.size) entries[idx + 1].second.toLong() - 1
+                       else fromOffset + 65535L
 
         scope.launch(Dispatchers.IO) {
             try {
-                val response = okhttp3.OkHttpClient().newCall(
-                    okhttp3.Request.Builder().url(url).get().build()
-                ).execute()
-                val bytes = response.body?.bytes() ?: return@launch
-                val sheet = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                val bytes = bifRangeGet(info.bifUrl, fromOffset, toOffset) ?: return@launch
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     ?: return@launch
-                thumbnailCache.put(url, sheet)
-                val frame = cropFrame(sheet, col, row, info.frameWidthPx, info.frameHeightPx)
-                withContext(Dispatchers.Main) { ivSeekThumbnail.setImageBitmap(frame) }
+                thumbCache.put(idx, bmp)
+                withContext(Dispatchers.Main) { ivSeekThumbnail.setImageBitmap(bmp) }
             } catch (e: Exception) {
-                Log.w(TAG, "Thumbnail load failed: $url", e)
+                Log.w(TAG, "BIF frame fetch failed idx=$idx", e)
             }
         }
-    }
-
-    private fun cropFrame(sheet: android.graphics.Bitmap, col: Int, row: Int, fw: Int, fh: Int): android.graphics.Bitmap {
-        val x = (col * fw).coerceAtMost(sheet.width - fw).coerceAtLeast(0)
-        val y = (row * fh).coerceAtMost(sheet.height - fh).coerceAtLeast(0)
-        val w = fw.coerceAtMost(sheet.width - x)
-        val h = fh.coerceAtMost(sheet.height - y)
-        return android.graphics.Bitmap.createBitmap(sheet, x, y, w, h)
     }
 
     private fun hideThumbnail() {

@@ -965,7 +965,7 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             append("&audioTrackId=all")
             append("&languageFeature=MLFv2")
             append("&videoMaterialType=").append(videoMaterialType)
-            append("&desiredResources=PlaybackUrls,SubtitleUrls,ForcedNarratives,TransitionTimecodes")
+            append("&desiredResources=PlaybackUrls,SubtitleUrls,ForcedNarratives,TransitionTimecodes,TrickplayUrls")
             append("&supportedDRMKeyScheme=DUAL_KEY")
             // Quality params (decisions.md Decision 16)
             append("&deviceVideoCodecOverride=").append(quality.codecOverride)
@@ -1009,7 +1009,8 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             Log.i(TAG, "Playback audio tracks asin=$asin: $summary")
         }
 
-        val thumbTrack = parseThumbnailTrack(manifestUrl)
+        val bifUrl = extractBifUrl(body)
+        Log.i(TAG, "Trickplay BIF: ${if (bifUrl.isNotEmpty()) bifUrl.take(80) else "none"}")
 
         return PlaybackInfo(
             manifestUrl = manifestUrl,
@@ -1017,89 +1018,36 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             asin = asin,
             subtitleTracks = subtitles,
             audioTracks = audioTracks,
-            thumbnailTrackUrl = thumbTrack.urlTemplate,
-            frameIntervalSec = thumbTrack.frameIntervalSec,
-            spriteColumns = thumbTrack.spriteColumns,
-            spriteRows = thumbTrack.spriteRows,
-            frameWidthPx = thumbTrack.frameWidthPx,
-            frameHeightPx = thumbTrack.frameHeightPx
+            bifUrl = bifUrl
         )
     }
 
-    private data class ThumbnailTrack(
-        val urlTemplate: String = "",
-        val frameIntervalSec: Int = 0,
-        val spriteColumns: Int = 1,
-        val spriteRows: Int = 1,
-        val frameWidthPx: Int = 0,
-        val frameHeightPx: Int = 0
-    )
-
     /**
-     * Fetches the DASH MPD and parses the first image adaptation set for trick-play
-     * thumbnail metadata.  Returns an empty [ThumbnailTrack] (all defaults) when no
-     * image track is found or when parsing fails — callers must degrade gracefully.
+     * Extracts the 480p (preferred) BIF trickplay file URL from a GetPlaybackResources
+     * JSON response.  Amazon returns trickplayUrls.trickplayUrlsCdnSets[].trickplayUrlInfoList[].
+     * Falls back to the first available URL if no 480p entry exists.
+     * Returns empty string when no trickplay data is present (trailers, etc.).
      */
-    private fun parseThumbnailTrack(manifestUrl: String): ThumbnailTrack {
+    private fun extractBifUrl(json: String): String {
         return try {
-            val mpd = client.newCall(Request.Builder().url(manifestUrl).get().build())
-                .execute().body?.string() ?: return ThumbnailTrack()
-
-            // Locate the first image AdaptationSet by mimeType or contentType.
-            val imageBlock = Regex(
-                """<AdaptationSet[^>]*(?:mimeType="image[^"]*"|contentType="image")[^>]*>([\s\S]*?)</AdaptationSet>""",
-                RegexOption.IGNORE_CASE
-            ).find(mpd)?.value ?: run {
-                Log.i(TAG, "No thumbnail adaptation set found in MPD")
-                return ThumbnailTrack()
+            val root = gson.fromJson(json, JsonObject::class.java)
+            val trickplayUrls = root.getAsJsonObject("trickplayUrls") ?: return ""
+            val cdnSets = trickplayUrls.getAsJsonArray("trickplayUrlsCdnSets") ?: return ""
+            var fallback = ""
+            for (cdnSet in cdnSets) {
+                val infoList = cdnSet.asJsonObject.getAsJsonArray("trickplayUrlInfoList") ?: continue
+                for (info in infoList) {
+                    val obj = info.asJsonObject
+                    val url = obj.get("url")?.asString?.takeIf { it.isNotBlank() } ?: continue
+                    val res = obj.get("resolution")?.asString ?: ""
+                    if (res == "480p") return url
+                    if (fallback.isEmpty()) fallback = url
+                }
             }
-
-            // SegmentTemplate media URL template (may be relative to MPD base URL).
-            val mediaTemplate = Regex("""<SegmentTemplate[^>]*\smedia="([^"]+)"""")
-                .find(imageBlock)?.groupValues?.get(1)
-                ?: return ThumbnailTrack()
-
-            val baseUrl = manifestUrl.substringBeforeLast("/") + "/"
-            val resolvedTemplate = if (mediaTemplate.startsWith("http")) mediaTemplate
-                                   else baseUrl + mediaTemplate
-
-            // Frame interval in seconds (duration / timescale).
-            val timescale = Regex("""<SegmentTemplate[^>]*\stimescale="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toLongOrNull() ?: 1L
-            val duration = Regex("""<SegmentTemplate[^>]*\sduration="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toLongOrNull() ?: timescale
-            val frameIntervalSec = (duration / timescale).toInt().coerceAtLeast(1)
-
-            // Representation total width/height (the whole sprite-sheet image).
-            val reprWidth  = Regex("""<Representation[^>]*\swidth="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val reprHeight = Regex("""<Representation[^>]*\sheight="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-
-            // Sprite grid — prefer explicit TileGrid / EssentialProperty, else single frame.
-            val tilesH = Regex("""horizontalTiles="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""schemeIdUri="[^"]*thumbnail[^"]*"[^>]*value="(\d+)x\d+"""", RegexOption.IGNORE_CASE)
-                    .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull()
-                ?: 1
-            val tilesV = Regex("""verticalTiles="(\d+)"""")
-                .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""schemeIdUri="[^"]*thumbnail[^"]*"[^>]*value="\d+x(\d+)"""", RegexOption.IGNORE_CASE)
-                    .find(imageBlock)?.groupValues?.get(1)?.toIntOrNull()
-                ?: 1
-
-            val frameWidth  = if (tilesH > 0 && reprWidth  > 0) reprWidth  / tilesH else reprWidth
-            val frameHeight = if (tilesV > 0 && reprHeight > 0) reprHeight / tilesV else reprHeight
-
-            if (resolvedTemplate.isEmpty() || frameWidth <= 0 || frameHeight <= 0) {
-                return ThumbnailTrack()
-            }
-
-            Log.i(TAG, "Thumbnail track: interval=${frameIntervalSec}s grid=${tilesH}x${tilesV} frame=${frameWidth}x${frameHeight} url=${resolvedTemplate.take(60)}")
-            ThumbnailTrack(resolvedTemplate, frameIntervalSec, tilesH, tilesV, frameWidth, frameHeight)
+            fallback
         } catch (e: Exception) {
-            Log.w(TAG, "parseThumbnailTrack failed", e)
-            ThumbnailTrack()
+            Log.w(TAG, "extractBifUrl failed", e)
+            ""
         }
     }
 
