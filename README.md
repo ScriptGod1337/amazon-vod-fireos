@@ -1,6 +1,7 @@
 # ScriptGod's FireOS AmazonVOD
 
 Native Android/Kotlin app for Fire TV that streams Amazon Prime Video content with Widevine L1 DRM.
+_(see [story](dev/background.story/story-funny.md))_
 
 ## Features
 
