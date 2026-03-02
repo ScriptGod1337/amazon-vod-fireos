@@ -1859,3 +1859,37 @@ See `dev/phase31-analysis.md` for the detailed findings.
 
 P0 and P1 fixes are planned for the next phase alongside the seekbar thumbnail feature.
 
+
+## Phase 32: COMPLETE
+- Applied all P0, P1, P2 fixes identified in the Phase 31 post-ship analysis
+- See `dev/phase31-analysis.md` for issue details and fix rationale
+
+### What was fixed
+
+| Issue | Fix |
+|-------|-----|
+| P0-A `-1L` sentinel invisible on detail page | `bindProgress()` guard changed `posMs <= 0L` → `posMs == 0L`; new explicit `-1L` branch shows "Finished recently" (no bar) |
+| P0-B Detail page stale after returning from player | Added `onResume()` in `DetailActivity` that re-reads `ProgressRepository` and updates button text + progress bar |
+| P1-A Percent formula diverges between detail page and card | Extracted `progressText(posMs, runtimeMs)` in `UiMetadataFormatter`; both surfaces delegate to it |
+| P1-B `OTHER` type label inconsistency ("MOVIE" vs "Featured") | Unified `contentLabel()` and `defaultOverline()` catch-all to `"Movie"` |
+| P1-C Season trailer button suppressed by `!isSeries` | Fixed to `(!isSeries || isSeason)` so seasons with a trailer show the Trailer button |
+| P2-A Redundant `pbWatchProgress.max = 1000` | Removed from `bindProgress()`; XML declaration is the single source of truth |
+| P2-B Watchlist double-tap sends duplicate API call | Added `watchlistUpdateInFlight` boolean with `try/finally` in `onWatchlistClicked()` |
+| P2-C `getInProgressEntries()` redundant `!= -1L` | Simplified to `positionMs > 0L` (the extra condition was already implied) |
+| P2-D `refresh()` overwrites newer local progress | Changed to max-position-wins merge: `-1L` always wins, otherwise keep the larger positive position |
+
+### Emulator test results
+
+| Test | Result |
+|------|--------|
+| P0-B: The Wrecking Crew — Play → watch 20 s → Back → detail page | ✅ Button changed to "▶  Resume", "1% watched · 123 min left" visible |
+| P1-A: Borderlands detail page vs CW card subtitle | ✅ Both show "11% watched · 86 min left" — canonical formatter confirmed |
+| P1-B: Unknown-type content detail page eyebrow | ✅ Shows "MOVIE" (was "Featured") |
+| P1-C: The Wrecking Crew — movie with `isTrailerAvailable = true` | ✅ "▷ Trailer" button visible |
+| P0-A: `-1L` sentinel → "Finished recently" | Logic-verified via code inspection (no fully-watched title available in test data) |
+
+### Not in scope (P3 deferred)
+- P3-A: Series detail last-episode resume shortcut
+- P3-B: Background progress refresh / TTL
+- P3-C: `seriesAsin` not set in `detailInfoToContentItem()`
+- Seekbar thumbnail preview (deferred from Phase 31)
