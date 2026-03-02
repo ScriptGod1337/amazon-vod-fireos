@@ -25,3 +25,19 @@ start-agents.sh       # Phase 1 (Opus): analyze Kodi plugin
 ```
 
 Subsequent phases (7-12) were run interactively via `claude` CLI sessions.
+
+## To debug ADB on the host
+ADB must be forwarded and listen in the host
+
+On the host - to listen on any IP
+```bash
+ANDROID_SDK_ROOT=/home/$USER/Android/Sdk # example of SDK root
+$ANDROID_SDK_ROOT/platform-tools/adb -a nodaemon server start # listen on all IPs
+```
+
+On the container
+```bash
+export ANDROID_ADB_SERVER_ADDRESS=<HOST IP> 
+# example
+export ANDROID_ADB_SERVER_ADDRESS=192.168.0.100
+```
