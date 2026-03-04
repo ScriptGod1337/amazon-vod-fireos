@@ -4,7 +4,7 @@
 
 Amazon Prime Video on FireTV now shows ads — unless you pay an extra €2,99/month on top of your existing €8,99/month subscription. This project is a native FireTV app that talks directly to Amazon's Prime Video API, plays streams via ExoPlayer with Widevine DRM, and contains exactly zero ad logic.
 
-Built with AI (Claude + Codex) through reverse-engineering the Kodi plugin's API, auth flows, and DRM handshake. No root required. No sideloading restrictions. Just install and watch.
+Built with AI (Claude + Codex) through reverse-engineering the Kodi plugin's API, Amazon Prime APKs, auth flows, and DRM handshake. No root required. No sideloading restrictions. Just install and watch.
 
 | Feature | Kodi Plugin | This App |
 |---|---|---|
