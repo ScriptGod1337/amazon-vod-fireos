@@ -5,6 +5,7 @@ paginate: true
 ---
 
 # How I Fired Amazon's Ads
+
 ## with an AI I Barely Supervised
 
 *A story about $500, a Dalvik decompiler, and a TV that turns itself on*
@@ -12,9 +13,12 @@ paginate: true
 ---
 
 ## I pay for Prime.
+
 ## Amazon still shows me ads.
 
-> "The ads are controlled by the **client**, not the server."
+> €8,99/month. Plus €2,99/month extra if you want it **without** ads.
+> A Munich court called this illegal in December 2025.
+> I called it a weekend project.
 
 → Replace the client. No ads.
 
@@ -24,12 +28,12 @@ paginate: true
 
 ## Attempt 1 — Kodi Plugin
 
-✅ Plays video
-❌ No watch progress tracking
-❌ Crashes audio decoder ~every 3rd episode
-❌ No fancy scrubber thumbnails
+✅ Plays video  
+❌ No watch progress tracking  
+❌ Crashes audio decoder ~every 3rd episode  
+❌ No fancy scrubber thumbnails  
 
-**Insight gained:** ads are injected client-side.
+**Insight gained:** ads are injected **client-side**.
 The stream itself is clean.
 
 ---
@@ -39,7 +43,7 @@ The stream itself is clean.
 ReVanced patches Android APKs to remove ads.
 There's even one for Amazon Prime Video.
 
-**Catch:** it's for a 2025 version of the app.
+**Catch:** it's for an older version of the app.
 
 **Plan:** ask AI to adapt the patch for the current version.
 
@@ -98,14 +102,14 @@ I have a warranty.
 AI produced a 13-row patch strategy comparison:
 
 | Approach | Preroll | Midroll | Difficulty | Risk |
-|----------|:-------:|:-------:|:----------:|:----:|
+| --- | --- | --- | --- | --- |
 | AdBreakSelector patch | ✅ | ✅ | Low | Very low |
 | DNS blocking | ❌ | ❌ | Low | None |
 | Block ad plan API | ✅ | ✅ | Low | **Breaks everything** |
 | Force AdInsertion.NONE | ✅ | ✅ | Medium | Medium |
 | ... 9 more rows ... | | | | |
 
-Conclusion: works, needs root, I have no root.
+Conclusion: works, needs root. I have no root.
 
 ---
 
@@ -113,9 +117,9 @@ Conclusion: works, needs root, I have no root.
 
 > "They said Vibe Coding is the new thing."
 
-**Idea:** native Android/Kotlin APK
-that talks directly to Amazon's API,
-plays DASH streams via ExoPlayer + Widevine DRM,
+**Idea:** native Android/Kotlin APK  
+that talks directly to Amazon's API,  
+plays DASH streams via ExoPlayer + Widevine DRM,  
 and contains **exactly zero ad logic**.
 
 ---
@@ -123,7 +127,7 @@ and contains **exactly zero ad logic**.
 ## AI Cost Estimate
 
 | Phase | AI Estimate |
-|-------|-------------|
+| --- | --- |
 | RE the API from Kodi | 3–5 days |
 | ExoPlayer + Widevine | 1–2 weeks |
 | Auth & Token Flow | 1–2 weeks |
@@ -137,11 +141,11 @@ and contains **exactly zero ad logic**.
 ## What Actually Happened
 
 ```
-Monday AM:   Me → standup meeting
-Monday AM:   AI → reverse-engineers Kodi plugin Python source
-Monday PM:   AI → Kotlin scaffold + auth layer
-Tuesday:     AI → catalog browser, token refresh, DRM handshake
-Wednesday:   My TV turns on by itself
+Monday AM:  Me → standup meeting
+Monday AM:  AI → reverse-engineers Kodi plugin Python source
+Monday PM:  AI → Kotlin scaffold + auth layer
+Tuesday AM: AI → catalog browser, token refresh, DRM handshake
+Tuesday PM: My TV turns on by itself
 ```
 
 ---
@@ -149,6 +153,7 @@ Wednesday:   My TV turns on by itself
 ## The TV Moment
 
 The AI:
+
 1. Finished building the app
 2. Compiled the release APK
 3. Pushed it to the FireTV via ADB
@@ -159,22 +164,25 @@ The AI:
 
 It worked. No ads.
 
-How did it know? `adb shell screencap` → pull → look at screenshot → repeat.
+How did it know? `adb shell screencap` → pull → look at screenshot → repeat.  
 *An AI, watching TV via a debug bridge, to verify its own homework.*
 
 ---
 
-## Actual Costs
+## Actual Costs (German Reality Edition)
 
 | Phase | Time | Cost |
-|-------|------|------|
-| PoC | 0.5 day | ~$30 |
-| 1st usable version | ~2 days | ~$50 |
-| Fancy UI + features | ~3 days | ~$400 |
+| --- | --- | --- |
+| PoC | ~half a day | ~$30 |
+| 1st usable version | ~1–2 days | ~$50 |
+| Fancy UI + features | ~2 days | ~$400 |
 | **Total** | | **~$500** |
 
 *Claude Max + ChatGPT Pro subscriptions, shared across projects.*
-*Note: Fancy phase required several days of human guidance — AI is good at building, less good at knowing what looks good from the couch.*
+
+> Compare: Amazon charges **€2,99/month extra** to not show you ads.  
+> That's **€35,88/year** to restore what you already paid for.  
+> Also: a Munich court ruled this illegal in December 2025. Just saying.
 
 ---
 
@@ -183,18 +191,18 @@ How did it know? `adb shell screencap` → pull → look at screenshot → repea
 🔍 **AI reverse engineers well** — APKs, bytecode, proprietary APIs. No complaints.
 
 🤔 **Could I have done this myself?**
-- RE the API → no chance
-- Build the PoC → no chance
-- Debugging → maybe… but AI picked Kotlin. So: also no.
+* RE the API → no chance
+* Build the PoC → no chance
+* Debugging → maybe… but AI picked Kotlin. So: also no.
 
 ⚡ **80% solution is fast. Last 20% costs money.**
 
-🐢 **Claude Sonnet doesn't give up.** Keeps iterating until it works.
+🐢 **Claude Sonnet doesn't give up.** Keeps iterating until it works.  
 🐇 **Codex is faster** but stops at checkpoints.
 
-🤝 **Let AIs review each other.** Claude writes, Codex reviews → faster, better results. Less defensive than humans.
+🤝 **Let AIs review each other.** Claude writes, Codex reviews → faster, better results.
 
-🏠 **Sandbox your AI.** Mine turned on my TV. Unannounced.
+🏠 **Sandbox your AI.** Mine turned on my TV. Unannounced. During a call.
 
 🗣️ **Prompting is a skill.** "Fix the UI" → nothing. "Crashes when scrolling past 20 items on the remote" → fixed.
 
@@ -204,21 +212,20 @@ How did it know? `adb shell screencap` → pull → look at screenshot → repea
 
 ## Links
 
-**Code & AI prompts**
+**Code & AI prompts**  
 github.com/ScriptGod1337/amazon-vod-noads
 
-**APK analysis prompts**
+**APK analysis prompts**  
 `.../analysis/primevideo_skipads_ai_prompt.md`
 
-**AI dev sandbox**
+**AI dev sandbox**  
 github.com/ScriptGod1337/ai-sandbox-vscode
 
 ---
 
 # Thank you
 
-*Total ads watched since deployment: **0***
-*Yogurt brands learned about: **0***
-*Times my TV turned on uninvited: **1** (acceptable)*
-
----
+*Total ads watched since deployment: **0***  
+*Yogurt brands learned about: **0***  
+*Times my TV turned on uninvited: **1** (acceptable)*  
+*Munich court rulings in my favour: **1** (bonus)*

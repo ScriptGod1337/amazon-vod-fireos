@@ -1,9 +1,28 @@
 # ScriptGod's FireOS AmazonVOD
 
-Native Android/Kotlin app for Fire TV that streams Amazon Prime Video content with Widevine L1 DRM.
-_(see [story](dev/background.story/story-funny.md))_
+> A native FireOS app that replaces Amazon's built-in Prime Video client — ad-free, no root required. Built by reverse-engineering the official FireTV APK and Amazon's internal API. Full D-pad navigation, Widevine DRM playback, watchlist and continue-watching support.
+
+Amazon Prime Video on FireTV now shows ads — unless you pay an extra €2,99/month on top of your existing €8,99/month subscription. This project is a native FireTV app that talks directly to Amazon's Prime Video API, plays streams via ExoPlayer with Widevine DRM, and contains exactly zero ad logic.
+
+Built with AI (Claude + Codex) through reverse-engineering the Kodi plugin's API, auth flows, and DRM handshake. No root required. No sideloading restrictions. Just install and watch.
+
+| Feature | Kodi Plugin | This App |
+|---|---|---|
+| Ad-free playback | ✅ | ✅ |
+| Watch progress sync | ❌ | ✅ |
+| Stable audio | ❌ crashes | ✅ |
+| Scrubber thumbnails | ❌ | ✅ |
+| D-pad / Leanback UI | ❌ | ✅ |
+| Search with suggestions | ❌ | ✅ |
+| Season/episode browser | ❌ | ✅ |
+| Widevine L1 (HDR/4K) | ❌ | ✅ |
+
+_(see [background story](dev/background.story/story-funny.md))_
 
 ## Features
+
+> 🚀 **Everything Kodi's plugin can't do** — watch progress, stable audio,
+> scrubber thumbnails, native D-pad UI, and Widevine L1 secure playback.
 
 ### Authentication & Account
 
