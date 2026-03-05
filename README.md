@@ -24,6 +24,30 @@ _(see [background story](dev/background.story/story-funny.md))_
 > 🚀 **Everything Kodi's plugin can't do** — watch progress, stable audio,
 > scrubber thumbnails, native D-pad UI, and Widevine L1 secure playback.
 
+| Home | Search Results |
+|:---:|:---:|
+| ![Home](screenshots/01_home_emulator.png) | ![Search Results](screenshots/02_search_emulator.png) |
+
+| Watchlist | Library |
+|:---:|:---:|
+| ![Watchlist](screenshots/03_watchlist_emulator.png) | ![Library](screenshots/04_library_emulator.png) |
+
+| About / Settings | Season Detail |
+|:---:|:---:|
+| ![About](screenshots/05_about_emulator.png) | ![Season Detail](screenshots/06_detail_season_emulator.png) |
+
+| Season Picker | Episode Browse |
+|:---:|:---:|
+| ![Season Picker](screenshots/07_browse_seasons_emulator.png) | ![Episode Browse](screenshots/08_browse_episodes_emulator.png) |
+
+| Player Controls Overlay | Continue Watching row |
+|:---:|:---:|
+| ![Player Controls](screenshots/09_player_overlay_emulator.png) | ![Continue Watching](screenshots/10_continue_watching_emulator.png) |
+
+| Detail page — Resume + Trailer + progress bar | Detail page — Play + Trailer (no progress) |
+|:---:|:---:|
+| ![Detail with progress](screenshots/11_detail_movie_progress_emulator.png) | ![Detail play + trailer](screenshots/12_detail_movie_play_emulator.png) |
+
 ### Authentication & Account
 
 - **In-app login** — Amazon email/password + MFA/TOTP support via PKCE OAuth device registration
@@ -117,34 +141,6 @@ com.scriptgod.fireos.avod
      +-- UiTransitions.kt          Page transition helpers
      +-- UiMetadataFormatter.kt    Badge and chip label formatting (4K, HDR, 5.1, codec, etc.)
 ```
-
-## Screenshots
-
-Current redesigned UI, captured from the Android TV emulator:
-
-| Home | Search Results |
-|:---:|:---:|
-| ![Home](screenshots/01_home_emulator.png) | ![Search Results](screenshots/02_search_emulator.png) |
-
-| Watchlist | Library |
-|:---:|:---:|
-| ![Watchlist](screenshots/03_watchlist_emulator.png) | ![Library](screenshots/04_library_emulator.png) |
-
-| About / Settings | Season Detail |
-|:---:|:---:|
-| ![About](screenshots/05_about_emulator.png) | ![Season Detail](screenshots/06_detail_season_emulator.png) |
-
-| Season Picker | Episode Browse |
-|:---:|:---:|
-| ![Season Picker](screenshots/07_browse_seasons_emulator.png) | ![Episode Browse](screenshots/08_browse_episodes_emulator.png) |
-
-| Player Controls Overlay | Continue Watching row |
-|:---:|:---:|
-| ![Player Controls](screenshots/09_player_overlay_emulator.png) | ![Continue Watching](screenshots/10_continue_watching_emulator.png) |
-
-| Detail page — Resume + Trailer + progress bar | Detail page — Play + Trailer (no progress) |
-|:---:|:---:|
-| ![Detail with progress](screenshots/11_detail_movie_progress_emulator.png) | ![Detail play + trailer](screenshots/12_detail_movie_play_emulator.png) |
 
 ## Known limitations
 
