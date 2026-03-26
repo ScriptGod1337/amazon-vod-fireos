@@ -99,6 +99,7 @@ class PlayerActivity : AppCompatActivity() {
     private var controllerView: View? = null
 
     private var player: ExoPlayer? = null
+    private var currentMediaSource: androidx.media3.exoplayer.source.MediaSource? = null
     private var trackSelector: DefaultTrackSelector? = null
     private lateinit var authService: AmazonAuthService
     private lateinit var apiService: AmazonApiService
@@ -123,6 +124,14 @@ class PlayerActivity : AppCompatActivity() {
     private var lastResumeSaveElapsedMs: Long = 0L
     private var seekResyncPending: Boolean = false
     private var currentPlaybackInfo: PlaybackInfo? = null
+    private var lastMediaSegmentUrl: String = ""
+    private var lastVideoSegmentUrl: String = ""
+    private var lastAudioSegmentUrl: String = ""
+    private var stallWatchdogJob: Job? = null
+    /** How many RENDERER_DECODER_STALLED / PLAYER_CORRUPT_FRAGMENT restarts have been attempted. Reset on fresh loadAndPlay. */
+    private var stallRestartCount = 0
+    /** True once an AUDIOTRACK_DOLBY restart (stereo fallback) has been attempted this session. */
+    private var audioRestartDone = false
     private lateinit var cardSeekThumbnail: androidx.cardview.widget.CardView
     private lateinit var ivSeekThumbnail: android.widget.ImageView
     private lateinit var tvSeekTime: android.widget.TextView
@@ -276,6 +285,14 @@ class PlayerActivity : AppCompatActivity() {
         val tokenFile = LoginActivity.findTokenFile(this)
             ?: run { finish(); return }
         authService = AmazonAuthService(tokenFile)
+        authService.onMediaRequestObserved = { url ->
+            lastMediaSegmentUrl = url
+            val lowerUrl = url.lowercase()
+            when {
+                lowerUrl.contains("_video_") -> lastVideoSegmentUrl = url
+                lowerUrl.contains("_audio_") -> lastAudioSegmentUrl = url
+            }
+        }
         apiService = AmazonApiService(authService)
         ProgressRepository.init(applicationContext)
 
@@ -372,6 +389,8 @@ class PlayerActivity : AppCompatActivity() {
         tvError.visibility = View.GONE
         tvVideoFormat.text = ""   // clear stale label until new player reports its format
         playerView.useController = true
+        stallRestartCount = 0
+        audioRestartDone = false
 
         val quality = resolveQuality()
         currentMaterialType = materialType
@@ -404,32 +423,68 @@ class PlayerActivity : AppCompatActivity() {
     /**
      * Sets up ExoPlayer with DASH + Widevine DRM.
      * Mirrors decisions.md Decision 4 and Phase 4 instructions.
+     *
+     * @param startPositionOverride When non-null, seek to this position instead of ProgressRepository.
+     *   Used by RENDERER_DECODER_STALLED / PLAYER_CORRUPT_FRAGMENT restarts.
+     * @param stereoOnly When true, cap audio to 2 channels (AUDIOTRACK_DOLBY restart).
      */
-    private fun setupPlayer(info: PlaybackInfo) {
+    private fun setupPlayer(
+        info: PlaybackInfo,
+        startPositionOverride: Long? = null,
+        stereoOnly: Boolean = false
+    ) {
         if (isDestroyed || isFinishing) return
         player?.removeListener(playerListener)
         player?.release()
         player = null
-        val licenseCallback = AmazonLicenseService(authService, info.licenseUrl)
+        Log.i(
+            TAG,
+            buildString {
+                append("Playback info: ")
+                append("manifest=").append(info.manifestUrl)
+                append(" license=").append(info.licenseUrl)
+                append(" resumeSeeked=").append(resumeSeeked)
+                append(" selectedQuality=").append(currentQuality)
+                append(" startPositionOverride=").append(startPositionOverride)
+                append(" stereoOnly=").append(stereoOnly)
+                append(" stallRestartCount=").append(stallRestartCount)
+                append(" passthroughRequested=")
+                    .append(getSharedPreferences("settings", MODE_PRIVATE).getBoolean(PREF_AUDIO_PASSTHROUGH, false))
+                append(" lastMediaSegment=").append(lastMediaSegmentUrl)
+                append(" lastVideoSegment=").append(lastVideoSegmentUrl)
+                append(" lastAudioSegment=").append(lastAudioSegmentUrl)
+            }
+        )
+        val drmDiag = java.io.File(getExternalFilesDir(null), "drm_diag.txt").also { it.delete() }
+        val licenseCallback = AmazonLicenseService(authService, info.licenseUrl, applicationContext, drmDiag)
 
         val drmSessionManager = DefaultDrmSessionManager.Builder()
             .setUuidAndExoMediaDrmProvider(WIDEVINE_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
             .setMultiSession(false) // single session reused across periods — matches Amazon default (mediadrm_multiSessionEnabled_2=false)
             .build(licenseCallback)
 
-        val passthroughEnabled = getSharedPreferences("settings", MODE_PRIVATE)
+        val passthroughRequested = getSharedPreferences("settings", MODE_PRIVATE)
             .getBoolean(PREF_AUDIO_PASSTHROUGH, false)
+        val passthroughEnabled = passthroughRequested
 
+        // Fire TV has no OMX.dolby.eac3.decoder.secure (audio DRM uses OMX.google.raw.decoder,
+        // which passes EAC3 bytes straight to AudioTrack → Dolby MS12 HAL → stall after ~1.5s).
+        // Amazon's audio is actually CLEAR despite the CENC declaration in the MPD
+        // (confirmed by supports-secure-with-non-secure-codec=true in media_codecs.xml).
+        // Force OMX.dolby.eac3.decoder (non-secure) for EAC3 so the hardware decodes to PCM
+        // rather than passing raw EAC3 to the Dolby HAL passthrough pipeline.
         val renderersFactory = object : DefaultRenderersFactory(this) {
             init { setExtensionRendererMode(EXTENSION_RENDERER_MODE_OFF) }
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink = DefaultAudioSink.Builder(context)
-                .setAudioCapabilities(AudioCapabilities.getCapabilities(context))
-                .setEnableAudioTrackPlaybackParams(passthroughEnabled)
-                .build()
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setAudioCapabilities(AudioCapabilities.getCapabilities(context))
+                    .setEnableAudioTrackPlaybackParams(passthroughEnabled)
+                    .build()
+            }
         }
 
         val dataSourceFactory = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(
@@ -462,21 +517,30 @@ class PlayerActivity : AppCompatActivity() {
         } else {
             dashSource
         }
+        currentMediaSource = mediaSource
 
         val selector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioRoleFlags(C.ROLE_FLAG_MAIN)
+                // AUDIOTRACK_DOLBY restart: cap to stereo so Dolby passthrough path is skipped
+                .setMaxAudioChannelCount(if (stereoOnly) 2 else Int.MAX_VALUE)
                 .build()
         }
         trackSelector = selector
         normalizedInitialAudioSelection = false
 
         // Trailers always start from beginning. For real content resume from ProgressRepository.
+        // Restart recovery (RENDERER_DECODER_STALLED / PLAYER_CORRUPT_FRAGMENT) supplies an
+        // explicit position so the player resumes exactly where it stalled, not from the bookmark.
         val intentResumeMs = intent.getLongExtra(EXTRA_RESUME_MS, 0L).coerceAtLeast(0L)
         val serverResumeMs = intentResumeMs.takeIf { it > 0L }
             ?: ProgressRepository.get(currentAsin)?.positionMs?.coerceAtLeast(0L)
             ?: 0L
-        val resumeMs = if (currentMaterialType == "Trailer") 0L else serverResumeMs
+        val resumeMs = when {
+            currentMaterialType == "Trailer" -> 0L
+            startPositionOverride != null -> startPositionOverride
+            else -> serverResumeMs
+        }
 
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(selector)
@@ -491,6 +555,7 @@ class PlayerActivity : AppCompatActivity() {
                     resumeSeeked = true
                 }
                 exoPlayer.playWhenReady = true
+                logPlaybackSnapshot("PLAYER_SETUP")
                 if (passthroughEnabled) {
                     val settingsPrefs = getSharedPreferences("settings", MODE_PRIVATE)
                     if (!settingsPrefs.getBoolean(PREF_AUDIO_PASSTHROUGH_WARNED, false)) {
@@ -556,8 +621,10 @@ class PlayerActivity : AppCompatActivity() {
     private fun updatePlaybackStatus() {
         val materialLabel = if (currentMaterialType == "Trailer") "Trailer" else "Playback"
         val qualityLabel = when (currentQuality) {
+            PlaybackQuality.SD_AVC  -> "SD AVC preset"
             PlaybackQuality.UHD_HDR -> "4K HDR preset"
             PlaybackQuality.HD_H265 -> "HD H265 preset"
+            PlaybackQuality.HD_AVC  -> "HD AVC preset"
             PlaybackQuality.HD      -> "HD H264 preset"
             PlaybackQuality.SD      -> "SD (Widevine L3)"
             else                    -> "HD H264 preset"
@@ -567,12 +634,21 @@ class PlayerActivity : AppCompatActivity() {
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
+            Log.w(
+                TAG,
+                "Playback state changed -> ${playbackStateName(state)} " +
+                    "pos=${player?.currentPosition}ms buffered=${player?.totalBufferedDuration}ms " +
+                    "loading=${player?.isLoading} playWhenReady=${player?.playWhenReady} " +
+                    "audio=${selectedAudioTrackSummary()}"
+            )
             when (state) {
                 Player.STATE_BUFFERING -> {
+                    Log.w(TAG, "STATE_BUFFERING pos=${player?.currentPosition}ms buffered=${player?.totalBufferedDuration}ms")
                     progressBar.visibility = View.VISIBLE
                     updatePlaybackWakeState(true)
                 }
                 Player.STATE_READY -> {
+                    Log.w(TAG, "STATE_READY pos=${player?.currentPosition}ms")
                     if (!seekResyncPending) {
                         progressBar.visibility = View.GONE
                     }
@@ -596,7 +672,14 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            Log.w(
+                TAG,
+                "isPlaying changed -> $isPlaying state=${playbackStateName(player?.playbackState ?: Player.STATE_IDLE)} " +
+                    "pos=${player?.currentPosition}ms buffered=${player?.totalBufferedDuration}ms " +
+                    "audio=${selectedAudioTrackSummary()}"
+            )
             updatePlaybackWakeState(isPlaying || seekResyncPending)
+            if (isPlaying) startStallWatchdog() else stopStallWatchdog()
             if (!streamReportingStarted) return
             if (isPlaying) {
                 startHeartbeat()
@@ -616,6 +699,16 @@ class PlayerActivity : AppCompatActivity() {
             newPosition: Player.PositionInfo,
             reason: Int
         ) {
+            val reasonName = when (reason) {
+                Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> "AUTO_TRANSITION"
+                Player.DISCONTINUITY_REASON_SEEK -> "SEEK"
+                Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT -> "SEEK_ADJUSTMENT"
+                Player.DISCONTINUITY_REASON_SKIP -> "SKIP"
+                Player.DISCONTINUITY_REASON_REMOVE -> "REMOVE"
+                Player.DISCONTINUITY_REASON_INTERNAL -> "INTERNAL"
+                else -> "UNKNOWN($reason)"
+            }
+            Log.w(TAG, "Discontinuity $reasonName period ${oldPosition.mediaItemIndex}→${newPosition.mediaItemIndex} pos ${oldPosition.positionMs}→${newPosition.positionMs}ms")
             if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                 Log.i(TAG, "Seek discontinuity old=${oldPosition.positionMs} new=${newPosition.positionMs}")
                 beginSeekResync()
@@ -631,6 +724,7 @@ class PlayerActivity : AppCompatActivity() {
             logCurrentAudioTracks(tracks)
             normalizeInitialAudioSelection(tracks)
             updateTrackButtonLabels(tracks)
+            Log.i(TAG, "Selected audio after tracksChanged: ${selectedAudioTrackSummary(tracks)}")
             updateVideoFormatLabel()
             // Re-hide native track buttons (they re-show on track change)
             playerView.post {
@@ -653,6 +747,36 @@ class PlayerActivity : AppCompatActivity() {
                 Log.e(TAG, "Player error: ${error.errorCodeName} HTTP ${httpCause.responseCode} url=$failingUrl")
             } else {
                 Log.e(TAG, "Player error: ${error.errorCodeName}", error)
+            }
+            logPlaybackSnapshot("PLAYER_ERROR", "code=${error.errorCodeName} http=${httpCause?.responseCode} url=$failingUrl")
+
+            val currentPos = player?.currentPosition ?: 0L
+
+            // AUDIOTRACK_DOLBY_OR_TUNNELED_INITIALIZE_FAILED_RESTART_PLAYER
+            // AudioTrack init failed (Dolby passthrough or tunneled mode couldn't open).
+            // Restart once with stereo-only audio (mirrors Amazon's AudioRenderer logic).
+            if (error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED && !audioRestartDone) {
+                audioRestartDone = true
+                Log.w(TAG, "AUDIOTRACK_DOLBY: restarting with stereo at pos=${currentPos}ms")
+                Toast.makeText(this@PlayerActivity, "Audio init failed — retrying with stereo\u2026", Toast.LENGTH_SHORT).show()
+                restartPlayerAtPosition(currentPos, "AUDIOTRACK_DOLBY", stereoOnly = true)
+                return
+            }
+
+            // PLAYER_CORRUPT_FRAGMENT
+            // Parse/decode error — media data is corrupt or unsupported at this position.
+            // Restart at the same position, up to 3 times total (shared counter with stall watchdog).
+            val isCorruptFragment = error.errorCode in listOf(
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                PlaybackException.ERROR_CODE_DECODING_FAILED
+            )
+            if (isCorruptFragment && stallRestartCount < 3) {
+                stallRestartCount++
+                Log.w(TAG, "PLAYER_CORRUPT_FRAGMENT: restarting at pos=${currentPos}ms (attempt $stallRestartCount/3)")
+                Toast.makeText(this@PlayerActivity, "Recovering from media error\u2026", Toast.LENGTH_SHORT).show()
+                restartPlayerAtPosition(currentPos, "PLAYER_CORRUPT_FRAGMENT")
+                return
             }
 
             persistPlaybackProgress(force = true)
@@ -691,6 +815,93 @@ class PlayerActivity : AppCompatActivity() {
             while (true) {
                 sendProgressEvent("PLAY")
                 delay(heartbeatIntervalMs)
+            }
+        }
+    }
+
+    /**
+     * Detects RENDERER_DECODER_STALLED: position frozen >6s with >30s buffered.
+     * Mirrors Amazon's RendererActivityWatchdog: full player restart at the stalled position
+     * (not a forward seek). Retry limit = 3, matching Amazon's PlaybackRestartType config.
+     */
+    private fun startStallWatchdog() {
+        stallWatchdogJob?.cancel()
+        stallWatchdogJob = scope.launch {
+            var lastPos = -1L
+            var frozenSince = 0
+            while (true) {
+                delay(2_000)
+                val p = player ?: break
+                if (!p.isPlaying) { frozenSince = 0; lastPos = -1L; continue }
+                val pos = p.currentPosition
+                val buffered = p.totalBufferedDuration
+                if (pos == lastPos && buffered > 30_000) {
+                    frozenSince++
+                    if (frozenSince >= 3) { // 6 seconds frozen
+                        logPlaybackSnapshot(
+                            "RENDERER_DECODER_STALLED",
+                            "frozenSince=${frozenSince * 2}s stallRestartCount=$stallRestartCount " +
+                                "lastVideoSegment=$lastVideoSegmentUrl lastAudioSegment=$lastAudioSegmentUrl"
+                        )
+                        stallRestartCount++
+                        if (stallRestartCount > 3) {
+                            Log.e(TAG, "RENDERER_DECODER_STALLED: exceeded retry limit, giving up")
+                            showError("Playback stalled and could not be recovered automatically.")
+                            break
+                        }
+                        Log.w(TAG, "RENDERER_DECODER_STALLED: pos=${pos}ms buffered=${buffered}ms — restarting player (attempt $stallRestartCount/3)")
+                        Toast.makeText(this@PlayerActivity, "Recovering from decoder stall\u2026", Toast.LENGTH_SHORT).show()
+                        restartPlayerAtPosition(pos, "RENDERER_DECODER_STALLED")
+                        break // loop exits; new watchdog starts when isPlaying fires again
+                    }
+                } else {
+                    frozenSince = 0
+                }
+                lastPos = pos
+            }
+        }
+    }
+
+    private fun stopStallWatchdog() {
+        stallWatchdogJob?.cancel()
+        stallWatchdogJob = null
+    }
+
+    /**
+     * Full session restart at [posMs] — mirrors Amazon's RestartPlaybackSessionTask.
+     * Re-fetches GetPlaybackResources to get a fresh manifest URL (possibly a different CDN node)
+     * and fresh license URL, then rebuilds ExoPlayer and seeks to the stalled position.
+     *
+     * Re-fetching PRS is critical: the stale manifest URL may route to the same CDN node
+     * that is serving the broken segment. Amazon's restart always goes through the full
+     * session lifecycle, which includes a new PRS call.
+     *
+     * @param stereoOnly True for AUDIOTRACK_DOLBY restart: caps audio to 2 channels.
+     */
+    private fun restartPlayerAtPosition(posMs: Long, reason: String, stereoOnly: Boolean = false) {
+        Log.w(TAG, "PLAYER_RESTART: reason=$reason posMs=$posMs stereoOnly=$stereoOnly attempt=$stallRestartCount")
+        stopStallWatchdog()
+        stopStreamReporting()
+        player?.removeListener(playerListener)
+        player?.release()
+        player = null
+        streamReportingStarted = false
+        resumeSeeked = false
+        progressBar.visibility = View.VISIBLE
+
+        // Re-fetch PRS to get a fresh manifest + license URL (Amazon's restart flow)
+        playbackJob?.cancel()
+        playbackJob = scope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) {
+                    apiService.getPlaybackInfo(currentAsin, currentMaterialType, currentQuality, watchSessionId)
+                }
+                currentPlaybackInfo = info
+                if (info.bifUrl.isNotEmpty()) loadBifIndex(info.bifUrl)
+                setupPlayer(info, startPositionOverride = posMs, stereoOnly = stereoOnly)
+            } catch (e: Exception) {
+                Log.e(TAG, "PLAYER_RESTART: PRS re-fetch failed: ${e.message}", e)
+                showError("Restart failed: ${e.message}")
             }
         }
     }
@@ -913,6 +1124,49 @@ class PlayerActivity : AppCompatActivity() {
             progressBar.visibility = View.GONE
         }
         updatePlaybackWakeState(player?.isPlaying == true)
+    }
+
+    private fun playbackStateName(state: Int): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "UNKNOWN($state)"
+    }
+
+    private fun formatSummary(format: Format?): String {
+        if (format == null) return "none"
+        val label = format.label?.takeIf { it.isNotBlank() } ?: "no-label"
+        val mime = format.sampleMimeType ?: "no-mime"
+        val codecs = format.codecs ?: "no-codecs"
+        val lang = format.language ?: "und"
+        return "label=$label lang=$lang mime=$mime codecs=$codecs channels=${format.channelCount} bitrate=${format.bitrate}"
+    }
+
+    private fun selectedAudioTrackSummary(tracks: Tracks? = player?.currentTracks): String {
+        val audioGroups = tracks?.groups?.filter { it.type == C.TRACK_TYPE_AUDIO }.orEmpty()
+        for (group in audioGroups) {
+            for (trackIndex in 0 until group.length) {
+                if (group.isTrackSelected(trackIndex)) {
+                    return formatSummary(group.getTrackFormat(trackIndex))
+                }
+            }
+        }
+        return "none"
+    }
+
+    private fun logPlaybackSnapshot(reason: String, extra: String = "") {
+        val p = player ?: return
+        val passthroughEnabled = getSharedPreferences("settings", MODE_PRIVATE)
+            .getBoolean(PREF_AUDIO_PASSTHROUGH, false)
+        val suffix = if (extra.isBlank()) "" else " $extra"
+        Log.i(
+            TAG,
+            "$reason pos=${p.currentPosition}ms buffered=${p.totalBufferedDuration}ms " +
+                "state=${playbackStateName(p.playbackState)} isPlaying=${p.isPlaying} " +
+                "playWhenReady=${p.playWhenReady} loading=${p.isLoading} " +
+                "audio=${selectedAudioTrackSummary()} passthrough=$passthroughEnabled$suffix"
+        )
     }
 
     private fun buildTrackOptions(trackType: Int, tracks: Tracks): List<TrackOption> {
@@ -1335,7 +1589,7 @@ class PlayerActivity : AppCompatActivity() {
         val signature = entries.joinToString(" || ")
         if (signature == lastLoggedAudioTrackSignature) return
         lastLoggedAudioTrackSignature = signature
-        Log.i(TAG, "Live audio tracks: ${entries.joinToString(" | ")}")
+        Log.w(TAG, "Live audio tracks: ${entries.joinToString(" | ")}")
     }
 
     private fun audioMenuKey(label: String, isAudioDescription: Boolean): String {
