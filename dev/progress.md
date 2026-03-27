@@ -1,45 +1,10 @@
 # Project Progress
 
-## Phase 35: COMPLETE — MPD segment timing stall fix
-
-**Root cause**: Amazon’s MPD uses `<SegmentList duration="351">` (3.656 s/segment fixed), but actual
-segment durations vary 2.625–5.0 s. Over 2087 segments the cumulative drift reaches ~41 s at the
-56-minute mark. ExoPlayer calculated segment index 920 but that segment contained data for ~3322 s
-(41 s behind). All frames were dropped as stale; the buffer filled with un-renderable data.
-
-**Validated**: Original MPD → permanent stall at 3367850 ms. Corrected MPD → plays through cleanly.
-Same title, same device, same DRM. Only variable changed: segment timing mechanism.
-
-- `MpdTimingCorrector.kt` — converts `SegmentList` (fixed inaccurate duration) to `SegmentBase+indexRange`
-  so ExoPlayer reads the sidx box for accurate per-segment timing; probes sidx size from one file (8-byte Range
-  request), reuses it for all representations (same segment count = same sidx box size = 25076 bytes)
-- Custom `DataSource` interceptor in `PlayerActivity` serves the corrected MPD in-memory; original CDN URI
-  kept as `MediaItem` so `BaseURL` resolution works; falls back to original MPD on any error
-- Stall watchdog bug fixes (3): `playWhenReady` used instead of `isPlaying` (false during BUFFERING);
-  watchdog no longer cancelled/restarted on every `BUFFERING↔READY` oscillation (~340 ms cycle);
-  position counter no longer reset by `isPlayingChanged` on buffering transitions
-- `StallRecoveryVideoRenderer` (custom `MediaCodecVideoRenderer` subclass) unwired — caused a pause
-  regression (800 ms threshold fired while paused); MPD correction is the primary fix; position-level
-  watchdog retained as safety net
-- DRM license protocol rewritten to match `playback.py` — `widevine2Challenge` form-encoded POST,
-  `widevine2License.license` response key; `buildLicenseUrl()` rebuilt as full `GetPlaybackResources`
-  endpoint with correct param set
-- `forceAVC` flag and `SD_AVC` / `HD_AVC` quality presets removed — flag was never sent in the request
-- Network logging: MPD, video/audio `.mp4` segment, and license requests logged with full URL;
-  `onMediaRequestObserved` callback added to `AmazonAuthService` for segment tracking
-- Root cause analysis: `dev/analysis/mpd-timing-stall-fix.md`
-
 ## Backlog
 
 | Item | Notes |
 |------|-------|
 | Remove `StallRecoveryVideoRenderer.kt` | Unwired, marked `TODO: remove`; safe to delete once Fire TV regression testing confirms MPD correction covers all stall scenarios |
-
-## Phase 13: COMPLETE — Playback stall isolation (investigation phase)
-- Isolated stall to content-specific DASH segment timing drift (see Phase 35 for resolution)
-- Ruled out: audio passthrough / EAC3, multi-session DRM, period boundaries, DRM key expiry, video resolution cap
-- Confirmed stall pinned to same content time (~3367850 ms / 56 min) across all audio/quality configurations
-- Key finding: stall is not codec or audio related — root cause is MPD `SegmentList` duration mismatch vs sidx
 
 ## Phase 1: COMPLETE
 - Analyzed all Kodi plugin source files in `/home/vscode/kodi-plugin/plugin.video.amazon-test/resources/lib/`
@@ -1300,7 +1265,7 @@ instead of the quality row above it.
 
 ---
 
-## Phase 27: PENDING — Full AI Code Review
+## Phase 27: COMPLETE — Full AI Code Review
 
 ### Goal
 
@@ -2180,3 +2145,32 @@ real mechanism: `TrickplayPlugin$DownloadBifFileFromUrl` + `Resource` enum value
 - ✅ `ProgressEntry` stores `seasonAsin`; `persistPlaybackProgress()` writes `currentSeasonAsin`
 - ✅ Local-only series resume `ContentItem` synthesis sets `seasonId` from `ProgressEntry.seasonAsin`
 - ✅ Old `ExoPlayer` released in `setupPlayer()` before building a new instance (no renderer leak)
+
+## Phase 35: COMPLETE — MPD segment timing stall fix (2026-03-27)
+
+**Root cause**: Amazon's MPD uses `<SegmentList duration="351">` (3.656 s/segment fixed), but actual
+segment durations vary 2.625–5.0 s. Over 2087 segments the cumulative drift reaches ~41 s at the
+56-minute mark. ExoPlayer calculated segment index 920 but that segment contained data for ~3322 s
+(41 s behind). All frames were dropped as stale; the buffer filled with un-renderable data.
+
+**Validated**: Original MPD → permanent stall at 3367850 ms. Corrected MPD → plays through cleanly.
+Same title, same device, same DRM. Only variable changed: segment timing mechanism.
+
+- `MpdTimingCorrector.kt` — converts `SegmentList` (fixed inaccurate duration) to `SegmentBase+indexRange`
+  so ExoPlayer reads the sidx box for accurate per-segment timing; probes sidx size from one file (8-byte Range
+  request), reuses it for all representations (same segment count = same sidx box size = 25076 bytes)
+- Custom `DataSource` interceptor in `PlayerActivity` serves the corrected MPD in-memory; original CDN URI
+  kept as `MediaItem` so `BaseURL` resolution works; falls back to original MPD on any error
+- Stall watchdog bug fixes (3): `playWhenReady` used instead of `isPlaying` (false during BUFFERING);
+  watchdog no longer cancelled/restarted on every `BUFFERING↔READY` oscillation (~340 ms cycle);
+  position counter no longer reset by `isPlayingChanged` on buffering transitions
+- `StallRecoveryVideoRenderer` (custom `MediaCodecVideoRenderer` subclass) unwired — caused a pause
+  regression (800 ms threshold fired while paused); MPD correction is the primary fix; position-level
+  watchdog retained as safety net
+- DRM license protocol rewritten to match `playback.py` — `widevine2Challenge` form-encoded POST,
+  `widevine2License.license` response key; `buildLicenseUrl()` rebuilt as full `GetPlaybackResources`
+  endpoint with correct param set
+- `forceAVC` flag and `SD_AVC` / `HD_AVC` quality presets removed — flag was never sent in the request
+- Network logging: MPD, video/audio `.mp4` segment, and license requests logged with full URL;
+  `onMediaRequestObserved` callback added to `AmazonAuthService` for segment tracking
+- Root cause analysis: `dev/analysis/mpd-timing-stall-fix.md`
