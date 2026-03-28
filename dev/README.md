@@ -24,8 +24,6 @@ start-agents.sh       # Phase 1 (Opus): analyze Kodi plugin
                       # Phases 2-6 (Sonnet): scaffold, port, build, deploy, debug
 ```
 
-Subsequent phases (7-12) were run interactively via `claude` CLI sessions.
-
 ## To debug ADB on the host
 ADB must be forwarded and listen in the host
 

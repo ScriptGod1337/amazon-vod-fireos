@@ -103,6 +103,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var btnAudio: Button
     private lateinit var btnSubtitle: Button
     private var controllerView: View? = null
+    private var currentTrackDialog: android.app.AlertDialog? = null
 
     private var player: ExoPlayer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -154,10 +155,12 @@ class PlayerActivity : AppCompatActivity() {
     private val hideTrackButtonsRunnable = Runnable {
         trackButtons.clearFocus()
         trackButtons.visibility = View.GONE
+        currentTrackDialog?.dismiss()
+        currentTrackDialog = null
     }
     private val syncTrackButtonsRunnable = object : Runnable {
         override fun run() {
-            val controllerVisible = controllerView?.visibility == View.VISIBLE
+            val controllerVisible = playerView.isControllerFullyVisible
             if (controllerVisible) {
                 if (trackButtons.visibility != View.VISIBLE) {
                     trackButtons.alpha = 1f
@@ -1304,16 +1307,13 @@ class PlayerActivity : AppCompatActivity() {
 
         val groups = tracks.groups.filter { it.type == trackType }
         val options = mutableListOf<TrackOption>()
-        val languageOrdinals = mutableMapOf<String, Int>()
 
         groups.forEachIndexed { groupIndex, group ->
             for (trackIndex in 0 until group.length) {
                 if (!group.isTrackSupported(trackIndex)) continue
                 val format = group.getTrackFormat(trackIndex)
-                val normalizedLanguage = normalizeLanguageCode(format.language)
-                val languageOrdinal = languageOrdinals[normalizedLanguage] ?: 0
                 val metadataName = if (trackType == C.TRACK_TYPE_AUDIO) {
-                    resolveAudioMetadataName(format, isAudioDescriptionTrack(format), languageOrdinal)
+                    resolveAudioMetadataName(format, isAudioDescriptionTrack(format))
                 } else null
                 val isAd = trackType == C.TRACK_TYPE_AUDIO && isAudioDescriptionTrack(format, metadataName)
                 if (trackType == C.TRACK_TYPE_AUDIO && isDialogueBoostLabel(metadataName ?: format.label.orEmpty())) {
@@ -1329,9 +1329,6 @@ class PlayerActivity : AppCompatActivity() {
                     isAudioDescription = isAd,
                     bitrate = format.bitrate
                 )
-                if (trackType == C.TRACK_TYPE_AUDIO) {
-                    languageOrdinals[normalizedLanguage] = languageOrdinal + 1
-                }
             }
         }
 
@@ -1409,55 +1406,33 @@ class PlayerActivity : AppCompatActivity() {
                     )!!
                 }
                 .sortedBy { it.option.groupIndex }
-
-            val metadataFamilies = metadataFamiliesForLanguage(normalizedLanguage)
-
-            if (metadataFamilies.isNotEmpty()) {
-                val bestByFamily = linkedMapOf<String, AudioResolvedOption>()
-                bestGroups.forEachIndexed { index, candidate ->
-                    val family = metadataFamilies[index % metadataFamilies.size]
-                    val familyKey = "$normalizedLanguage|${family.familyKind}"
-                    val option = candidate.option.copy(
-                        label = decorateAudioLabel(
-                            liveLabel = candidate.rawLabel,
-                            metadataLabel = family.label,
-                            familyKind = family.familyKind,
-                            normalizedLanguage = normalizedLanguage,
-                            channelCount = candidate.channelCount
-                        ),
-                        isAudioDescription = family.isAudioDescription
-                    )
-                    val existing = bestByFamily[familyKey]
-                    val better = existing == null ||
-                        (option.isSelected && !existing.option.isSelected) ||
-                        (!existing.option.isSelected && option.bitrate > existing.option.bitrate)
-                    if (better) {
-                        bestByFamily[familyKey] = AudioResolvedOption(option, familyKey)
-                    }
+            val bestByFamily = linkedMapOf<String, AudioResolvedOption>()
+            bestGroups.forEach { candidate ->
+                val metadata = resolveAudioOptionMetadata(
+                    normalizedLanguage = normalizedLanguage,
+                    rawLabel = candidate.rawLabel,
+                    trackIndex = candidate.option.trackIndex
+                )
+                val familyKind = audioFamilyKind(metadata, candidate.rawLabel)
+                val option = candidate.option.copy(
+                    label = resolveAudioMenuLabel(
+                        normalizedLanguage = normalizedLanguage,
+                        metadata = metadata,
+                        rawLabel = candidate.rawLabel,
+                        fallbackLanguage = normalizedLanguage
+                    ),
+                    isAudioDescription = familyKind == "ad"
+                )
+                val familyKey = "$normalizedLanguage|$familyKind"
+                val existing = bestByFamily[familyKey]
+                val better = existing == null ||
+                    (option.isSelected && !existing.option.isSelected) ||
+                    (!existing.option.isSelected && option.bitrate > existing.option.bitrate)
+                if (better) {
+                    bestByFamily[familyKey] = AudioResolvedOption(option, familyKey)
                 }
-                resolved += bestByFamily.values
-            } else {
-                val bestByFamily = linkedMapOf<String, AudioResolvedOption>()
-                bestGroups.forEach { candidate ->
-                    val inferredAd = isAudioDescriptionTrack(
-                        candidate.option.group.getTrackFormat(candidate.option.trackIndex),
-                        null
-                    )
-                    val option = candidate.option.copy(
-                        label = fallbackAudioLabel(candidate, normalizedLanguage),
-                        isAudioDescription = inferredAd
-                    )
-                    val familyKey = "$normalizedLanguage|fallback-${if (inferredAd) "ad" else "main"}"
-                    val existing = bestByFamily[familyKey]
-                    val better = existing == null ||
-                        (option.isSelected && !existing.option.isSelected) ||
-                        (!existing.option.isSelected && option.bitrate > existing.option.bitrate)
-                    if (better) {
-                        bestByFamily[familyKey] = AudioResolvedOption(option, familyKey)
-                    }
-                }
-                resolved += bestByFamily.values
             }
+            resolved += bestByFamily.values
         }
 
         return resolved
@@ -1594,8 +1569,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun resolveAudioMetadataName(
         format: Format,
-        guessedAd: Boolean,
-        languageOrdinal: Int
+        guessedAd: Boolean
     ): String? {
         if (availableAudioTracks.isEmpty()) return null
         val normalizedLanguage = normalizeLanguageCode(format.language)
@@ -1627,8 +1601,6 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
             if (preferredMatches.size == 1) return preferredMatches.first().displayName
-            preferredMatches.getOrNull(languageOrdinal)?.let { return it.displayName }
-            languageMatches.getOrNull(languageOrdinal)?.let { return it.displayName }
             if (directLabel.isNotBlank()) {
                 preferredMatches.firstOrNull {
                     it.displayName.contains(directLabel, ignoreCase = true)
@@ -1808,7 +1780,8 @@ class PlayerActivity : AppCompatActivity() {
             if (option.isSelected) selectedIndex = labels.size - 1
         }
 
-        AlertDialog.Builder(this)
+        currentTrackDialog?.dismiss()
+        currentTrackDialog = AlertDialog.Builder(this)
             .setTitle(typeName)
             .setSingleChoiceItems(labels.toTypedArray(), selectedIndex) { dialog, which ->
                 val (gi, ti) = trackIndices[which]
@@ -1827,14 +1800,18 @@ class PlayerActivity : AppCompatActivity() {
                     p.trackSelectionParameters = builder.build()
                 }
                 dialog.dismiss()
+                currentTrackDialog = null
             }
+            .setOnDismissListener { currentTrackDialog = null }
             .show()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val seekBar = playerView.findViewById<View>(androidx.media3.ui.R.id.exo_progress)
         if (event.action == KeyEvent.ACTION_DOWN &&
             (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
-            playerView.isControllerFullyVisible) {
+            playerView.isControllerFullyVisible &&
+            currentFocus == seekBar) {
             // Accumulate seek position ourselves — player.currentPosition is updated
             // asynchronously by ExoPlayer and won't reflect the seek target in time for
             // rapid successive key presses.

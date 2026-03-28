@@ -27,11 +27,12 @@ Fire TV is connected via ADB. IP is in `.env` as `FIRETV_IP`.
 adb connect $FIRETV_IP:5555
 ```
 
+Refer `README.md` how to connect the emulator - use the IP of the example
 ---
 
 ## Authentication
 
-A valid device token is at `/home/vscode/amazon-vod-android/.device-token` (created before agents start).
+A valid device token is at `.device-token` (created before agents start).
 
 ### Token Usage
 ```kotlin
@@ -61,8 +62,8 @@ After EVERY phase write to `/home/vscode/amazon-vod-android/progress.md`:
 - Note any blockers or decisions
 
 Phase 1 also writes:
-- `/home/vscode/amazon-vod-android/analysis/api-map.md` — endpoints, auth flow, license URL
-- `/home/vscode/amazon-vod-android/analysis/decisions.md` — file references, workarounds
+- `dev/analysis/api-map.md` — endpoints, auth flow, license URL
+- `dev/analysis/decisions.md` — file references, workarounds
 
 ## Resume Behavior
 On start, ALWAYS:
@@ -81,8 +82,6 @@ Rebuild and reinstall after changes:
 ./gradlew assembleRelease
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
-Mark `Phase 7: COMPLETE` in `progress.md`.
-
 ---
 
 ## General Rules
