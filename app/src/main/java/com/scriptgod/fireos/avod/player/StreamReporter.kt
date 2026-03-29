@@ -3,7 +3,7 @@ package com.scriptgod.fireos.avod.player
 import android.util.Log
 import androidx.media3.common.util.UnstableApi
 import com.scriptgod.fireos.avod.api.AmazonApiService
-import com.scriptgod.fireos.avod.data.ProgressRepository
+import com.scriptgod.fireos.avod.data.ProgressRepository  // object singleton — injected for explicit dependency
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,7 +134,7 @@ class StreamReporter(
         val posMs = positionProvider()
         if (!force && posMs <= 0L) return
         if (!force && posMs - lastResumeSaveElapsedMs < 25_000L) return
-        ProgressRepository.update(
+        progressRepository.update(
             currentAsinProvider(),
             posMs,
             durationProvider(),
@@ -145,11 +145,4 @@ class StreamReporter(
         lastResumeSaveElapsedMs = posMs
     }
 
-    fun startResumeProgressUpdates(onStartResumeProgressUpdates: () -> Unit) {
-        onStartResumeProgressUpdates()
-    }
-
-    fun stopResumeProgressUpdates(onStopResumeProgressUpdates: () -> Unit) {
-        onStopResumeProgressUpdates()
-    }
 }
