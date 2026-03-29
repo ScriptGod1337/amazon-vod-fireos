@@ -1619,31 +1619,16 @@ class PlayerActivity : AppCompatActivity() {
         val metadataLabel = metadata?.displayName?.replace("\\s+".toRegex(), " ")?.trim().orEmpty()
         val liveLabel = rawLabel.replace("\\s+".toRegex(), " ").trim()
         val resolved = when (familyKind) {
-            "main" -> {
-                // If Amazon returned an AD-sounding displayName on a main (type=dialog) track,
-                // the label is mismatched — skip it and fall back to language name.
-                val trustedLabel = metadataLabel.takeUnless { it.contains("audiobeschreibung", ignoreCase = true) }
-                when {
-                    CHANNEL_SUFFIX_REGEX.containsMatchIn(liveLabel) -> liveLabel
-                    trustedLabel?.isNotBlank() == true -> trustedLabel
-                    liveLabel.isNotBlank() -> liveLabel
-                    else -> baseLanguage
-                }
+            "main" -> when {
+                CHANNEL_SUFFIX_REGEX.containsMatchIn(liveLabel) -> liveLabel
+                metadataLabel.isNotBlank() -> metadataLabel
+                liveLabel.isNotBlank() -> liveLabel
+                else -> baseLanguage
             }
-            "ad" -> {
-                val base = when {
-                    metadataLabel.isNotBlank() -> metadataLabel
-                    liveLabel.contains("audio description", ignoreCase = true) -> liveLabel
-                    liveLabel.contains("[AD]", ignoreCase = true) -> liveLabel
-                    else -> baseLanguage
-                }
-                if (base.contains("audio description", ignoreCase = true) ||
-                    base.contains("audiobeschreibung", ignoreCase = true) ||
-                    base.contains("[AD]", ignoreCase = true)) {
-                    base
-                } else {
-                    "$base [Audio Description]"
-                }
+            "ad" -> when {
+                metadataLabel.isNotBlank() -> metadataLabel
+                liveLabel.isNotBlank() -> liveLabel
+                else -> "$baseLanguage [Audio Description]"
             }
             "boost-high" -> when {
                 metadataLabel.isNotBlank() -> "$metadataLabel [Dialogue Boost: High]"
@@ -1758,8 +1743,7 @@ class PlayerActivity : AppCompatActivity() {
         return when {
             isAudioDescriptionTrack(format, metadata?.displayName) ||
                 metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") ||
-                source.contains("[ad]") -> "ad"
+                source.contains("audio description") -> "ad"
             source.contains("dialogue boost: high") -> "boost-high"
             source.contains("dialogue boost: medium") -> "boost-medium"
             source.contains("dialogue boost") -> "boost"
@@ -1807,8 +1791,7 @@ class PlayerActivity : AppCompatActivity() {
             .lowercase()
         return when {
             metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") ||
-                source.contains("[ad]") -> "ad"
+                source.contains("audio description") -> "ad"
             source.contains("dialogue boost: high") -> "boost-high"
             source.contains("dialogue boost: medium") -> "boost-medium"
             source.contains("dialogue boost") -> "boost"
@@ -1882,9 +1865,8 @@ class PlayerActivity : AppCompatActivity() {
         }
         val label = format.label.orEmpty()
         return label.contains("audio description", ignoreCase = true) ||
-            label.contains("descriptive", ignoreCase = true) ||
             label.contains("described video", ignoreCase = true) ||
-            Regex("""(^|\W)AD($|\W)""", RegexOption.IGNORE_CASE).containsMatchIn(label)
+            Regex("""\[AD]""", RegexOption.IGNORE_CASE).containsMatchIn(label)
     }
 
     private fun normalizeInitialAudioSelection(tracks: Tracks) {
