@@ -68,7 +68,7 @@ class PlaybackOrchestrator(
         fun hideBuffering()
         fun onError(message: String)
         fun onFinish()
-        fun onFormatChanged()
+        fun onPlaybackLabelsChanged()
         fun onTracksChanged(tracks: Tracks)
         fun onKeepScreenOn(on: Boolean)
         fun onTitleChanged(title: String)
@@ -577,7 +577,7 @@ class PlaybackOrchestrator(
                 Player.STATE_READY -> {
                     Log.w(TAG, "STATE_READY pos=${player?.currentPosition}ms")
                     if (!seekResyncPending) callbacks.hideBuffering()
-                    callbacks.onFormatChanged()
+                    callbacks.onPlaybackLabelsChanged()
                     if (!streamReporter.streamReportingStarted) {
                         streamReporter.streamReportingStarted = true
                         startStreamReporting()
@@ -637,10 +637,10 @@ class PlaybackOrchestrator(
             callbacks.onTracksChanged(tracks)
             Log.i(TAG, "Selected audio after tracksChanged: ${selectedAudioTrackSummary(tracks)}")
             PlaybackLogger.logVideoTracks(TAG, tracks)
-            callbacks.onFormatChanged()
+            callbacks.onPlaybackLabelsChanged()
         }
 
-        override fun onVideoSizeChanged(videoSize: VideoSize) { callbacks.onFormatChanged() }
+        override fun onVideoSizeChanged(videoSize: VideoSize) { callbacks.onPlaybackLabelsChanged() }
 
         override fun onPlayerError(error: PlaybackException) {
             val httpCause = generateSequence(error.cause) { it.cause }
@@ -712,7 +712,7 @@ class PlaybackOrchestrator(
                 "mime=${currentAudioSampleMimeType.ifBlank { "-" }} codecs=${currentAudioCodecs.ifBlank { "-" }} " +
                 "channels=${format.channelCount} bitrate=${format.bitrate} " +
                 "sinkMode=$currentAudioSinkMode sinkCaps={$currentAudioSinkCapabilities}")
-            callbacks.onFormatChanged()
+            callbacks.onPlaybackLabelsChanged()
         }
 
         override fun onDroppedVideoFrames(eventTime: AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long) {

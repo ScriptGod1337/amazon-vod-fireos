@@ -266,7 +266,7 @@ class PlayerActivity : AppCompatActivity() {
         override fun hideBuffering() { progressBar.visibility = View.GONE }
         override fun onError(message: String) = showError(message)
         override fun onFinish()  = finish()
-        override fun onFormatChanged()   = updateVideoFormatLabel()
+        override fun onPlaybackLabelsChanged() = updateVideoFormatLabel()
         override fun onTracksChanged(tracks: Tracks) {
             trackMenu.updateTrackButtonLabels(tracks)
             playerView.post {
