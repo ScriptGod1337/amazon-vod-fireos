@@ -85,10 +85,10 @@ class LoginActivity : AppCompatActivity() {
 
         btnLogin.setOnClickListener { onLoginClicked() }
         btnSkip.setOnClickListener {
-            if (TokenStore.findTokenFile(this) != null) launchMain()
-            else showStatus("No .device-token file found")
+            if (tokenStore.isValid()) launchMain()
+            else showStatus("No valid token found")
         }
-        btnSkip.visibility = if (TokenStore.findTokenFile(this) != null) View.VISIBLE else View.GONE
+        btnSkip.visibility = if (tokenStore.isValid()) View.VISIBLE else View.GONE
     }
 
     private fun onLoginClicked() {
