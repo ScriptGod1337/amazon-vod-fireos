@@ -130,6 +130,10 @@ class PlayerActivity : AppCompatActivity() {
     private var currentQuality: PlaybackQuality = PlaybackQuality.HD
     private var currentAudioBitrateKbps: Int = 0
     private var currentAudioChannelCount: Int = 0
+    private var currentAudioSampleMimeType: String = ""
+    private var currentAudioCodecs: String = ""
+    private var currentAudioSinkMode: String = "unknown"
+    private var currentAudioSinkCapabilities: String = "unknown"
     private var currentVideoBitrateKbps: Int = 0
     private var resumeSeeked: Boolean = false
     private var seekResyncPending: Boolean = false
@@ -367,6 +371,10 @@ class PlayerActivity : AppCompatActivity() {
         audioRestartDone = false
         currentAudioBitrateKbps = 0
         currentAudioChannelCount = 0
+        currentAudioSampleMimeType = ""
+        currentAudioCodecs = ""
+        currentAudioSinkMode = "unknown"
+        currentAudioSinkCapabilities = "unknown"
         currentVideoBitrateKbps = 0
 
         val quality = resolveQuality()
@@ -453,16 +461,16 @@ class PlayerActivity : AppCompatActivity() {
             .setMultiSession(false) // single session reused across periods — matches Amazon default (mediadrm_multiSessionEnabled_2=false)
             .build(licenseCallback)
 
-        val passthroughRequested = getSharedPreferences("settings", MODE_PRIVATE)
+        val passthroughEnabled = getSharedPreferences("settings", MODE_PRIVATE)
             .getBoolean(PREF_AUDIO_PASSTHROUGH, false)
-        val passthroughEnabled = passthroughRequested
 
-        // Fire TV has no OMX.dolby.eac3.decoder.secure (audio DRM uses OMX.google.raw.decoder,
-        // which passes EAC3 bytes straight to AudioTrack → Dolby MS12 HAL → stall after ~1.5s).
-        // Amazon's audio is actually CLEAR despite the CENC declaration in the MPD
+        // Amazon's audio is CLEAR (not encrypted) despite the CENC declaration in the MPD
         // (confirmed by supports-secure-with-non-secure-codec=true in media_codecs.xml).
-        // Force OMX.dolby.eac3.decoder (non-secure) for EAC3 so the hardware decodes to PCM
-        // rather than passing raw EAC3 to the Dolby HAL passthrough pipeline.
+        // We override buildAudioSink to give the user a passthrough toggle:
+        //   - enabled:  pass real device AudioCapabilities so ExoPlayer can attempt EAC3/AC3
+        //               passthrough if the connected display supports it.
+        //   - disabled: pass DEFAULT_AUDIO_CAPABILITIES (no passthrough encodings) so ExoPlayer
+        //               always decodes to PCM, regardless of display capabilities.
         val renderersFactory = object : DefaultRenderersFactory(this) {
             init {
                 setExtensionRendererMode(EXTENSION_RENDERER_MODE_OFF)
@@ -473,11 +481,18 @@ class PlayerActivity : AppCompatActivity() {
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
-                // AudioCapabilities controls which encodings the sink will pass through to the
-                // hardware decoder (EAC3, AC3, etc.). When passthrough is disabled, use the
-                // default capabilities (stereo PCM only) so the sink always decodes to PCM.
                 val caps = if (passthroughEnabled) AudioCapabilities.getCapabilities(context)
                            else AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES
+                currentAudioSinkMode = if (passthroughEnabled) "passthrough-capable" else "pcm-only"
+                currentAudioSinkCapabilities =
+                    "eac3=${caps.supportsEncoding(C.ENCODING_E_AC3)} " +
+                    "ac3=${caps.supportsEncoding(C.ENCODING_AC3)} " +
+                    "pcmOnly=${caps == AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES}"
+                Log.i(
+                    TAG,
+                    "AUDIO_SINK mode=$currentAudioSinkMode requestedPassthrough=$passthroughEnabled " +
+                        "caps={$currentAudioSinkCapabilities}"
+                )
                 return DefaultAudioSink.Builder(context)
                     .setAudioCapabilities(caps)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
@@ -681,6 +696,14 @@ class PlayerActivity : AppCompatActivity() {
         ) {
             currentAudioBitrateKbps = if (format.bitrate > 0) format.bitrate / 1000 else 0
             currentAudioChannelCount = format.channelCount
+            currentAudioSampleMimeType = format.sampleMimeType.orEmpty()
+            currentAudioCodecs = format.codecs.orEmpty()
+            Log.i(
+                TAG,
+                "AUDIO_FMT pos=${eventTime.currentPlaybackPositionMs}ms mime=${currentAudioSampleMimeType.ifBlank { "-" }} " +
+                    "codecs=${currentAudioCodecs.ifBlank { "-" }} channels=${format.channelCount} bitrate=${format.bitrate} " +
+                    "sinkMode=$currentAudioSinkMode sinkCaps={$currentAudioSinkCapabilities}"
+            )
             updateVideoFormatLabel()
         }
 
@@ -1084,7 +1107,9 @@ class PlayerActivity : AppCompatActivity() {
             "$reason pos=${p.currentPosition}ms buffered=${p.totalBufferedDuration}ms " +
                 "state=${playbackStateName(p.playbackState)} isPlaying=${p.isPlaying} " +
                 "playWhenReady=${p.playWhenReady} loading=${p.isLoading} " +
-                "audio=${selectedAudioTrackSummary()} passthrough=$passthroughEnabled$suffix"
+                "audio=${selectedAudioTrackSummary()} passthrough=$passthroughEnabled " +
+                "sinkMode=$currentAudioSinkMode sinkCaps={$currentAudioSinkCapabilities} " +
+                "audioInput=mime=${currentAudioSampleMimeType.ifBlank { "-" }} codecs=${currentAudioCodecs.ifBlank { "-" }}$suffix"
         )
     }
 
