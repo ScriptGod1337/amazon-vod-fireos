@@ -32,24 +32,6 @@ class AudioTrackResolver(private var availableAudioTracks: List<AudioTrack>) {
         val language: String = ""
     )
 
-    data class AudioLiveCandidate(
-        val option: TrackOption,
-        val normalizedLanguage: String,
-        val rawLabel: String,
-        val channelCount: Int
-    )
-
-    data class AudioResolvedOption(
-        val option: TrackOption,
-        val familyKey: String
-    )
-
-    data class AudioMetadataFamily(
-        val familyKind: String,
-        val label: String,
-        val isAudioDescription: Boolean
-    )
-
     var lastLoggedAudioTrackSignature: String = ""
     var lastLoggedAudioResolutionSignature: String = ""
 
@@ -239,68 +221,5 @@ class AudioTrackResolver(private var availableAudioTracks: List<AudioTrack>) {
         return orderedByFamily.getOrNull(variantOrdinal)
             ?: orderedByFamily.firstOrNull()
             ?: candidates.minWithOrNull(compareBy { it.displayName.length })
-    }
-
-    fun metadataFamiliesForLanguage(normalizedLanguage: String): List<AudioMetadataFamily> {
-        return availableAudioTracks
-            .filter { AudioTrackLabeler.normalizeAudioGroupLanguage(it.languageCode) == normalizedLanguage }
-            .map {
-                val familyKind = AudioTrackLabeler.audioFamilyKind(it, it.displayName)
-                AudioMetadataFamily(
-                    familyKind = familyKind,
-                    label = it.displayName.replace("\\s+".toRegex(), " ").trim(),
-                    isAudioDescription = familyKind == "ad"
-                )
-            }
-            .distinctBy { it.familyKind }
-            .sortedBy { AudioTrackLabeler.audioFamilyRank(it.familyKind) }
-    }
-
-    fun resolveAudioMetadataName(format: Format, guessedAd: Boolean): String? {
-        if (availableAudioTracks.isEmpty()) return null
-        val normalizedLanguage = AudioTrackLabeler.normalizeLanguageCode(format.language)
-        val directLabel = format.label?.trim().orEmpty()
-        if (directLabel.isNotBlank()) {
-            availableAudioTracks.firstOrNull { it.displayName.equals(directLabel, ignoreCase = true) }
-                ?.let { return it.displayName }
-        }
-
-        val languageMatches = availableAudioTracks.filter {
-            AudioTrackLabeler.normalizeLanguageCode(it.languageCode) == normalizedLanguage
-        }
-        if (languageMatches.size == 1) return languageMatches.first().displayName
-
-        if (languageMatches.isNotEmpty()) {
-            val preferredMatches = if (guessedAd) {
-                languageMatches.filter {
-                    it.isAudioDescription() || it.type.equals("descriptive", ignoreCase = true)
-                }
-            } else {
-                languageMatches.filter {
-                    !it.isAudioDescription() && it.type.equals("dialog", ignoreCase = true)
-                }.ifEmpty {
-                    languageMatches.filterNot { it.isAudioDescription() }
-                }
-            }
-            if (preferredMatches.size == 1) return preferredMatches.first().displayName
-            if (directLabel.isNotBlank()) {
-                preferredMatches.firstOrNull {
-                    it.displayName.contains(directLabel, ignoreCase = true)
-                }?.let { return it.displayName }
-            }
-        }
-
-        if (directLabel.isNotBlank()) {
-            availableAudioTracks.firstOrNull {
-                it.displayName.contains(directLabel, ignoreCase = true)
-            }?.let { return it.displayName }
-        }
-        return null
-    }
-
-    fun fallbackAudioLabel(candidate: AudioLiveCandidate, normalizedLanguage: String): String {
-        val cleanedLive = candidate.rawLabel.replace("\\s+".toRegex(), " ").trim()
-        val base = cleanedLive.ifBlank { AudioTrackLabeler.displayLanguage(normalizedLanguage) }
-        return AudioTrackLabeler.appendChannelLayout(base, candidate.channelCount)
     }
 }

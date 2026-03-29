@@ -14,6 +14,31 @@ object AudioTrackLabeler {
 
     val CHANNEL_SUFFIX_REGEX = Regex("""\s+\d\.\d(\s*(surround|atmos))?""", RegexOption.IGNORE_CASE)
 
+    private fun audioSignalText(vararg parts: String?): String =
+        parts.joinToString(" ") { it.orEmpty() }.lowercase()
+
+    private fun dialogueBoostFamilyKind(source: String): String? = when {
+        source.contains("dialogue boost: high") -> "boost-high"
+        source.contains("dialogue boost: medium") -> "boost-medium"
+        source.contains("dialogue boost") -> "boost"
+        else -> null
+    }
+
+    private fun hasAudioDescriptionSignal(
+        metadataType: String?,
+        metadataName: String?,
+        label: String
+    ): Boolean {
+        val metadataNameValue = metadataName.orEmpty()
+        val source = audioSignalText(metadataNameValue, metadataType, label)
+        return metadataType.equals("descriptive", ignoreCase = true) ||
+            metadataNameValue.contains("audio description", ignoreCase = true) ||
+            metadataNameValue.contains("[AD]", ignoreCase = true) ||
+            source.contains("audio description") ||
+            source.contains("described video") ||
+            Regex("""\[AD]""", RegexOption.IGNORE_CASE).containsMatchIn(source)
+    }
+
     fun audioFamilyRank(kind: String): Int = when (kind) {
         "main" -> 0
         "boost-medium" -> 1
@@ -25,15 +50,12 @@ object AudioTrackLabeler {
 
     fun audioFamilyKind(metadata: AudioTrack?, label: String): String {
         val metadataType = metadata?.type.orEmpty()
-        val source = listOf(metadata?.displayName.orEmpty(), metadataType, label)
-            .joinToString(" ")
-            .lowercase()
+        val source = audioSignalText(metadata?.displayName, metadataType, label)
         return when {
-            metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") -> "ad"
-            source.contains("dialogue boost: high") -> "boost-high"
-            source.contains("dialogue boost: medium") -> "boost-medium"
-            source.contains("dialogue boost") -> "boost"
+            hasAudioDescriptionSignal(metadataType, metadata?.displayName, label) -> "ad"
+            dialogueBoostFamilyKind(source) == "boost-high" -> "boost-high"
+            dialogueBoostFamilyKind(source) == "boost-medium" -> "boost-medium"
+            dialogueBoostFamilyKind(source) == "boost" -> "boost"
             else -> "main"
         }
     }
@@ -44,19 +66,13 @@ object AudioTrackLabeler {
         rawLabel: String
     ): String {
         val metadataType = metadata?.type.orEmpty()
-        val source = listOf(
-            metadata?.displayName.orEmpty(),
-            metadataType,
-            rawLabel,
-            format.label.orEmpty()
-        ).joinToString(" ").lowercase()
+        val source = audioSignalText(metadata?.displayName, metadataType, rawLabel, format.label)
         return when {
             isAudioDescriptionTrack(format, metadata?.displayName) ||
-                metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") -> "ad"
-            source.contains("dialogue boost: high") -> "boost-high"
-            source.contains("dialogue boost: medium") -> "boost-medium"
-            source.contains("dialogue boost") -> "boost"
+                hasAudioDescriptionSignal(metadataType, metadata?.displayName, rawLabel) -> "ad"
+            dialogueBoostFamilyKind(source) == "boost-high" -> "boost-high"
+            dialogueBoostFamilyKind(source) == "boost-medium" -> "boost-medium"
+            dialogueBoostFamilyKind(source) == "boost" -> "boost"
             else -> "main"
         }
     }
@@ -65,14 +81,11 @@ object AudioTrackLabeler {
         // Check live format role flags first — set when MPD contains <Role value="description">
         // (injected by MpdTimingCorrector for audioTrackId="*_descriptive" AdaptationSets).
         if ((format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0) return true
-        if (!metadataName.isNullOrBlank()) {
-            return metadataName.contains("audio description", ignoreCase = true) ||
-                metadataName.contains("[AD]", ignoreCase = true)
-        }
-        val label = format.label.orEmpty()
-        return label.contains("audio description", ignoreCase = true) ||
-            label.contains("described video", ignoreCase = true) ||
-            Regex("""\[AD]""", RegexOption.IGNORE_CASE).containsMatchIn(label)
+        return hasAudioDescriptionSignal(
+            metadataType = null,
+            metadataName = metadataName,
+            label = format.label.orEmpty()
+        )
     }
 
     fun resolveAudioMenuLabel(
