@@ -99,6 +99,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var tvPlaybackTitle: TextView
     private lateinit var tvPlaybackStatus: TextView
     private lateinit var tvVideoFormat: TextView
+    private lateinit var tvAudioFormat: TextView
     private lateinit var tvPlaybackHint: TextView
     private lateinit var btnAudio: Button
     private lateinit var btnSubtitle: Button
@@ -124,6 +125,8 @@ class PlayerActivity : AppCompatActivity() {
     private var currentMaterialType: String = "Feature"
     private var currentQuality: PlaybackQuality = PlaybackQuality.HD
     private var currentAudioBitrateKbps: Int = 0
+    private var currentAudioChannelCount: Int = 0
+    private var currentVideoBitrateKbps: Int = 0
     private var watchSessionId: String = UUID.randomUUID().toString()
     private var pesSessionToken: String = ""
     private var heartbeatIntervalMs: Long = 60_000
@@ -190,7 +193,8 @@ class PlayerActivity : AppCompatActivity() {
         val familyKind: String,
         val isSelected: Boolean,
         val isAudioDescription: Boolean,
-        val bitrate: Int
+        val bitrate: Int,
+        val language: String = ""
     )
 
     private data class AudioLiveCandidate(
@@ -237,6 +241,7 @@ class PlayerActivity : AppCompatActivity() {
         tvPlaybackTitle = findViewById(R.id.tv_playback_title)
         tvPlaybackStatus = findViewById(R.id.tv_playback_status)
         tvVideoFormat = findViewById(R.id.tv_video_format)
+        tvAudioFormat = findViewById(R.id.tv_audio_format)
         tvPlaybackHint = findViewById(R.id.tv_playback_hint)
         btnAudio = findViewById(R.id.btn_audio)
         btnSubtitle = findViewById(R.id.btn_subtitle)
@@ -407,6 +412,8 @@ class PlayerActivity : AppCompatActivity() {
         stallRestartCount = 0
         audioRestartDone = false
         currentAudioBitrateKbps = 0
+        currentAudioChannelCount = 0
+        currentVideoBitrateKbps = 0
 
         val quality = resolveQuality()
         currentMaterialType = materialType
@@ -671,7 +678,7 @@ class PlayerActivity : AppCompatActivity() {
      * Called from onVideoSizeChanged (ABR switch) and onTracksChanged (track swap / fallback).
      */
     private fun updateVideoFormatLabel() {
-        val fmt = player?.videoFormat ?: run { tvVideoFormat.text = ""; return }
+        val fmt = player?.videoFormat ?: run { tvVideoFormat.text = ""; tvAudioFormat.visibility = View.GONE; return }
         val res = when (fmt.height) {
             in 2160..Int.MAX_VALUE -> "4K"
             1080                   -> "1080p"
@@ -696,10 +703,22 @@ class PlayerActivity : AppCompatActivity() {
             codecs.startsWith("hvc1.2") || codecs.startsWith("hev1.2") -> "HDR10"
             else -> ""
         }
-        val audio = if (currentAudioBitrateKbps > 0) "${currentAudioBitrateKbps}k" else ""
-        val label = listOf(res, codec, hdr, audio).filter { it.isNotEmpty() }.joinToString(" · ")
-        tvVideoFormat.text = label
-        tvVideoFormat.visibility = if (label.isBlank()) View.GONE else View.VISIBLE
+        val vBitrate = if (currentVideoBitrateKbps > 0) " · ${currentVideoBitrateKbps}k" else ""
+        val videoLabel = listOf(res, codec, hdr).filter { it.isNotEmpty() }.joinToString(" · ") + vBitrate
+        tvVideoFormat.text = videoLabel
+        tvVideoFormat.visibility = if (videoLabel.isBlank()) View.GONE else View.VISIBLE
+
+        val channels = when (currentAudioChannelCount) {
+            1 -> "1.0"
+            2 -> "2.0"
+            6 -> "5.1"
+            8 -> "7.1"
+            else -> if (currentAudioChannelCount > 0) "${currentAudioChannelCount}ch" else ""
+        }
+        val audioParts = listOf(channels, if (currentAudioBitrateKbps > 0) "${currentAudioBitrateKbps}k" else "").filter { it.isNotEmpty() }
+        val audioLabel = audioParts.joinToString(" · ")
+        tvAudioFormat.text = audioLabel
+        tvAudioFormat.visibility = if (audioLabel.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun updatePlaybackStatus() {
@@ -732,6 +751,7 @@ class PlayerActivity : AppCompatActivity() {
             Log.w(TAG, "VIDEO_FMT pos=${eventTime.currentPlaybackPositionMs}ms " +
                 "${format.width}x${format.height} bitrate=${format.bitrate} " +
                 "codecs=${format.codecs} reuse=${decoderReuseEvaluation?.result}")
+            currentVideoBitrateKbps = if (format.bitrate > 0) format.bitrate / 1000 else 0
         }
 
         override fun onAudioInputFormatChanged(
@@ -740,6 +760,7 @@ class PlayerActivity : AppCompatActivity() {
             decoderReuseEvaluation: DecoderReuseEvaluation?
         ) {
             currentAudioBitrateKbps = if (format.bitrate > 0) format.bitrate / 1000 else 0
+            currentAudioChannelCount = format.channelCount
             updateVideoFormatLabel()
         }
 
@@ -1412,14 +1433,20 @@ class PlayerActivity : AppCompatActivity() {
                 val format = group.getTrackFormat(trackIndex)
                 val normalizedLanguage = normalizeAudioGroupLanguage(format.language)
                 val rawLabel = format.label?.trim().orEmpty()
-                val variantKey = "$normalizedLanguage|${format.channelCount}"
+                // Use MPD Role flag (set by MpdTimingCorrector for _descriptive AdaptationSets)
+                // as the authoritative AD signal before metadata lookup.
+                val mpdIsAd = (format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0
+                // Keep AD and non-AD ordinals independent so MPD track ordering (e.g.
+                // [dialog, descriptive, boost-medium]) doesn't shift the non-AD counter.
+                val variantKey = "$normalizedLanguage|${format.channelCount}|${if (mpdIsAd) "ad" else "main"}"
                 val variantOrdinal = languageVariantCounts[variantKey] ?: 0
                 languageVariantCounts[variantKey] = variantOrdinal + 1
                 val metadata = resolveAudioOptionMetadata(
                     normalizedLanguage = normalizedLanguage,
                     rawLabel = rawLabel,
                     trackIndex = trackIndex,
-                    variantOrdinal = variantOrdinal
+                    variantOrdinal = variantOrdinal,
+                    mpdIsAd = mpdIsAd
                 )
                 val isAd = isAudioDescriptionTrack(format, metadata?.displayName)
                 val familyKind = when {
@@ -1441,8 +1468,9 @@ class PlayerActivity : AppCompatActivity() {
                     label = label,
                     familyKind = familyKind,
                     isSelected = group.isTrackSelected(trackIndex),
-                    isAudioDescription = isAd,
-                    bitrate = format.bitrate
+                    isAudioDescription = familyKind == "ad",
+                    bitrate = format.bitrate,
+                    language = normalizedLanguage
                 )
                 resolutionEntries += "group=$groupIndex track=$trackIndex raw=${rawLabel.ifBlank { "-" }} lang=${format.language.orEmpty()} role=${format.roleFlags} channels=${format.channelCount} metadata=${metadata?.displayName ?: "-"} type=${metadata?.type ?: "-"} index=${metadata?.index ?: "-"} family=$familyKind label=$label selected=${group.isTrackSelected(trackIndex)}"
             }
@@ -1470,10 +1498,9 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         val sorted = bestByLabel.values.sortedWith(
-            compareBy<TrackOption> { if (it.isAudioDescription) 1 else 0 }
+            compareBy<TrackOption> { it.language }
+                .thenBy { if (it.isAudioDescription) 1 else 0 }
                 .thenBy { it.label.lowercase() }
-                .thenBy { it.groupIndex }
-                .thenBy { it.trackIndex }
         )
 
         Log.i(TAG, "Audio menu options: ${
@@ -1488,7 +1515,8 @@ class PlayerActivity : AppCompatActivity() {
         normalizedLanguage: String,
         rawLabel: String,
         trackIndex: Int,
-        variantOrdinal: Int
+        variantOrdinal: Int,
+        mpdIsAd: Boolean = false
     ): AudioTrack? {
         if (availableAudioTracks.isEmpty()) return null
 
@@ -1502,13 +1530,23 @@ class PlayerActivity : AppCompatActivity() {
         }
         if (languageMatches.isEmpty()) return null
 
+        // If the MPD authoritatively identifies this track's AD status, filter metadata
+        // to only match the correct family (descriptive vs. non-descriptive).
+        val typedByMpd = if (mpdIsAd) {
+            languageMatches.filter { it.type.equals("descriptive", ignoreCase = true) }
+                .ifEmpty { languageMatches }
+        } else {
+            languageMatches.filter { !it.type.equals("descriptive", ignoreCase = true) }
+                .ifEmpty { languageMatches }
+        }
+
         val requestedFamily = audioFamilyKind(null, rawLabel)
         val typedMatches = if (requestedFamily == "main") {
-            languageMatches
+            typedByMpd
         } else {
-            languageMatches.filter { audioFamilyKind(it, it.displayName) == requestedFamily }
+            typedByMpd.filter { audioFamilyKind(it, it.displayName) == requestedFamily }
         }
-        val candidates = typedMatches.ifEmpty { languageMatches }
+        val candidates = typedMatches.ifEmpty { typedByMpd }
 
         val orderedByFamily = candidates
             .sortedWith(
@@ -1538,11 +1576,11 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun audioFamilyRank(kind: String): Int = when (kind) {
-        "ad" -> 0
-        "main" -> 1
-        "boost-medium" -> 2
-        "boost-high" -> 3
-        "boost" -> 4
+        "main" -> 0
+        "boost-medium" -> 1
+        "boost-high" -> 2
+        "boost" -> 3
+        "ad" -> 4
         else -> 5
     }
 
@@ -1582,9 +1620,12 @@ class PlayerActivity : AppCompatActivity() {
         val liveLabel = rawLabel.replace("\\s+".toRegex(), " ").trim()
         val resolved = when (familyKind) {
             "main" -> {
+                // If Amazon returned an AD-sounding displayName on a main (type=dialog) track,
+                // the label is mismatched — skip it and fall back to language name.
+                val trustedLabel = metadataLabel.takeUnless { it.contains("audiobeschreibung", ignoreCase = true) }
                 when {
                     CHANNEL_SUFFIX_REGEX.containsMatchIn(liveLabel) -> liveLabel
-                    metadataLabel.isNotBlank() -> metadataLabel
+                    trustedLabel?.isNotBlank() == true -> trustedLabel
                     liveLabel.isNotBlank() -> liveLabel
                     else -> baseLanguage
                 }
@@ -1596,7 +1637,9 @@ class PlayerActivity : AppCompatActivity() {
                     liveLabel.contains("[AD]", ignoreCase = true) -> liveLabel
                     else -> baseLanguage
                 }
-                if (base.contains("audio description", ignoreCase = true) || base.contains("[AD]", ignoreCase = true)) {
+                if (base.contains("audio description", ignoreCase = true) ||
+                    base.contains("audiobeschreibung", ignoreCase = true) ||
+                    base.contains("[AD]", ignoreCase = true)) {
                     base
                 } else {
                     "$base [Audio Description]"
@@ -1830,11 +1873,13 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun isAudioDescriptionTrack(format: Format, metadataName: String? = null): Boolean {
+        // Check live format role flags first — set when MPD contains <Role value="description">
+        // (injected by MpdTimingCorrector for audioTrackId="*_descriptive" AdaptationSets).
+        if ((format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0) return true
         if (!metadataName.isNullOrBlank()) {
             return metadataName.contains("audio description", ignoreCase = true) ||
                 metadataName.contains("[AD]", ignoreCase = true)
         }
-        if ((format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0) return true
         val label = format.label.orEmpty()
         return label.contains("audio description", ignoreCase = true) ||
             label.contains("descriptive", ignoreCase = true) ||

@@ -4,6 +4,23 @@ All notable changes to ScriptGod's FireOS AmazonVOD are documented here.
 
 ## [Unreleased]
 
+## [2026.03.29.1] - 2026-03-29
+
+### Fixed (Phase 36 — Audio track menu overhaul)
+
+- **Audio Description detection now authoritative** — `MpdTimingCorrector` always parses the MPD and injects `<Role schemeIdUri="urn:mpeg:dash:role:2011" value="description"/>` into every `AdaptationSet` whose `audioTrackId` contains `_descriptive`; ExoPlayer sets `ROLE_FLAG_DESCRIBES_VIDEO` on those tracks, eliminating all string-heuristic AD guessing
+- **German AD track correctly separated from main track** — root cause was `audioFamilyRank` putting `"ad"` at rank 0 (matched first), causing the descriptive metadata to win the `variantOrdinal=0` slot; fixed to `main→0 … ad→4`
+- **`subtype` field now read from Amazon API response** — `AmazonApiService.extractAudioTracks` previously read `"type"` and `"audioSubtype"` but not `"subtype"` (Amazon's actual field); both German tracks were classified as `"main"` and collapsed to one; now reads `"subtype"` first
+- **Dialogue Boost Medium no longer disappears** — `variantOrdinal` counter now keyed by `"lang|channels|main"` vs `"lang|channels|ad"` independently; previously the descriptive track in the middle of the MPD (e.g., `[dialog, descriptive, boost-medium]`) consumed ordinal 1, pushing boost-medium to ordinal 2 which fell off the two-entry `[main, boost-medium]` list and collapsed to `"main"`, deduplicating with the dialog track
+- **`resolveAudioOptionMetadata` guided by MPD AD flag** — non-AD tracks now exclude `type=="descriptive"` metadata entries; AD tracks match only `type=="descriptive"`; prevents mismatched metadata from mislabeling tracks even when Amazon's `displayName` fields are swapped for a title
+- **`isAudioDescriptionTrack` checks `ROLE_FLAG_DESCRIBES_VIDEO` first** — role flags take precedence over metadata name string matching, so the MPD injection is the primary signal regardless of what the API returns
+
+### Changed (Phase 36)
+
+- **Audio and video format labels split into two separate boxes** — video box shows resolution · codec · HDR · bitrate (e.g. `872p · H265 · 192k`); audio box shows channel layout · bitrate (e.g. `5.1 · 192k`); both boxes hidden when data is unavailable
+- **Channel count added to audio format box** — live `channelCount` from `onAudioInputFormatChanged` mapped to `1.0 / 2.0 / 5.1 / 7.1`
+- **Audio track menu groups by language** — sort order changed to `language → isAudioDescription → label` so Dialogue Boost and Audio Description tracks appear immediately below their language's main track rather than at the bottom of the whole list
+
 ## [2026.03.27.1] - 2026-03-27
 
 ### Fixed (Phase 35 — MPD segment timing stall)

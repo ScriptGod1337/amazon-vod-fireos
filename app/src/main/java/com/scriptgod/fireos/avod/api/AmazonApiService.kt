@@ -635,7 +635,9 @@ class AmazonApiService(private val authService: AmazonAuthService) {
                         languageCode = obj.safeString("language")
                             ?: obj.safeString("languageCode")
                             ?: "",
-                        type = obj.safeString("type") ?: "",
+                        type = obj.safeString("subtype")
+                            ?: obj.safeString("type")
+                            ?: "",
                         index = obj.safeString("index")
                             ?: obj.safeString("id")
                             ?: "",
@@ -1011,7 +1013,7 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             val summary = audioTracks.joinToString(" | ") {
                 "name=${it.displayName}, lang=${it.languageCode}, type=${it.type}, index=${it.index}"
             }
-            Log.i(TAG, "Playback audio tracks asin=$asin: $summary")
+            Log.w(TAG, "Playback audio tracks asin=$asin: $summary")
         }
 
         val bifUrl = extractBifUrl(body)
@@ -1132,7 +1134,8 @@ class AmazonApiService(private val authService: AmazonAuthService) {
                         languageCode = obj.get("languageCode")?.asString
                             ?: obj.get("language")?.asString
                             ?: "",
-                        type = obj.get("type")?.asString
+                        type = obj.get("subtype")?.asString
+                            ?: obj.get("type")?.asString
                             ?: obj.get("audioSubtype")?.asString
                             ?: "",
                         index = obj.get("index")?.asString

@@ -79,8 +79,8 @@ Selecting any movie or series opens a full detail screen before playback:
 
 - **Long-form content stall fixed** — Amazon's MPD declares a fixed segment duration that drifts up to 41 seconds from actual durations over a 2-hour movie; `MpdTimingCorrector` rewrites the manifest at load time to use `SegmentBase+indexRange` so ExoPlayer reads accurate per-segment timing from the sidx box instead of the inaccurate fixed duration
 - **Widevine L1** hardware-secure playback (DASH / MPD); automatic L3/SD fallback on emulators
-- **Audio & subtitle track selection** — labels from Amazon's API metadata; Audio Description tagging; family grouping (main / AD / Dialogue Boost); channel layout suffix (`2.0`, `5.1`, `7.1`); MENU key or pause shows controls; overlay follows Media3 controller visibility with no flicker
-- **Video format label** in overlay — active codec, resolution, and HDR status (e.g. `720p · H265 · SDR`, `4K · H265 · HDR10`), updated live as ABR ramps up
+- **Audio & subtitle track selection** — labels from Amazon's API metadata; Audio Description identified from MPD `audioTrackId="_descriptive"` (same signal the official app uses); Dialogue Boost variants (medium / high) correctly separated; channel layout suffix (`2.0`, `5.1`, `7.1`); all tracks for the same language grouped together in the menu; MENU key or pause shows controls
+- **Separate video and audio format labels** in overlay — video box shows codec · resolution · HDR (e.g. `872p · H265`) with live bitrate; audio box shows channel layout · bitrate (e.g. `5.1 · 192k`); both update live as ABR adapts
 - **Seekbar seeking** — D-pad left/right seeks ±10 seconds per press (hold to repeat)
 - **Resume from last position** — auto-seeks to where you left off; direct-play surfaces pass the saved position explicitly so resume works even after local cache is cleared
 - **Watch progress tracking** via UpdateStream API (START / PLAY / PAUSE / STOP) + PES V2 session reporting

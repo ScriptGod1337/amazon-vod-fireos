@@ -76,18 +76,39 @@
             android:textColor="@color/text_secondary"
             android:textSize="@dimen/meta_text_size" />
 
-        <TextView
-            android:id="@+id/tv_video_format"
+        <LinearLayout
             android:layout_width="wrap_content"
-            android:layout_height="32dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:background="@drawable/player_track_label"
-            android:gravity="center_vertical"
-            android:minWidth="0dp"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:textColor="#C6D0D6"
-            android:textSize="@dimen/compact_control_text_size" />
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tv_video_format"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:background="@drawable/player_track_label"
+                android:gravity="center_vertical"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:textColor="#C6D0D6"
+                android:textSize="@dimen/compact_control_text_size" />
+
+            <TextView
+                android:id="@+id/tv_audio_format"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/player_track_label"
+                android:gravity="center_vertical"
+                android:minWidth="0dp"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:textColor="#C6D0D6"
+                android:textSize="@dimen/compact_control_text_size"
+                android:visibility="gone" />
+
+        </LinearLayout>
 
         <TextView
             android:id="@+id/tv_playback_hint"

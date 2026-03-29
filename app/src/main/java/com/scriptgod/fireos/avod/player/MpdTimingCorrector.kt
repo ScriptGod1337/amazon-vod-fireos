@@ -31,36 +31,74 @@ object MpdTimingCorrector {
     suspend fun correctMpd(mpdUrl: String, httpClient: OkHttpClient): String {
         Log.w(TAG, "Downloading MPD...")
         val mpdXml = downloadString(mpdUrl, httpClient)
-
-        if (!mpdXml.contains("SegmentList") || !mpdXml.contains("duration=\"")) {
-            Log.w(TAG, "No SegmentList with duration, skipping correction")
-            return mpdXml
-        }
-
         val mpdBaseUrl = mpdUrl.substringBeforeLast('/') + "/"
 
         return try {
-            rewriteSegmentListToBase(mpdXml, mpdBaseUrl, httpClient)
+            val doc = parseXml(mpdXml)
+            val rolesInjected = injectDescriptiveAudioRoles(doc)
+
+            if (mpdXml.contains("SegmentList") && mpdXml.contains("duration=\"")) {
+                rewriteSegmentListToBase(doc, mpdBaseUrl, httpClient)
+            } else if (rolesInjected) {
+                serializeXml(doc)
+            } else {
+                Log.w(TAG, "No SegmentList or roles to inject, returning original")
+                mpdXml
+            }
         } catch (e: Exception) {
             Log.e(TAG, "MPD correction failed: ${e.message}", e)
             mpdXml
         }
     }
 
+    /**
+     * Injects <Role schemeIdUri="urn:mpeg:dash:role:2011" value="description"/> into every
+     * AdaptationSet whose audioTrackId contains "_descriptive" (Amazon's authoritative AD marker).
+     * ExoPlayer maps value="description" to ROLE_FLAG_DESCRIBES_VIDEO, which our audio menu
+     * uses for reliable AD detection without needing string heuristics.
+     */
+    private fun injectDescriptiveAudioRoles(doc: Document): Boolean {
+        val adaptationSets = doc.getElementsByTagName("AdaptationSet")
+        var injected = false
+        for (i in 0 until adaptationSets.length) {
+            val adaptationSet = adaptationSets.item(i) as? Element ?: continue
+            val audioTrackId = adaptationSet.getAttribute("audioTrackId")
+            if (!audioTrackId.contains("_descriptive", ignoreCase = true)) continue
+
+            // Skip if Role=description already present
+            val children = adaptationSet.childNodes
+            val alreadyHasRole = (0 until children.length).any { j ->
+                val child = children.item(j)
+                child is Element && child.localName == "Role" &&
+                    child.getAttribute("value") == "description"
+            }
+            if (alreadyHasRole) continue
+
+            val role = doc.createElement("Role")
+            role.setAttribute("schemeIdUri", "urn:mpeg:dash:role:2011")
+            role.setAttribute("value", "description")
+            val firstChild = adaptationSet.firstChild
+            if (firstChild != null) adaptationSet.insertBefore(role, firstChild)
+            else adaptationSet.appendChild(role)
+            injected = true
+            Log.w(TAG, "Injected Role=description for audioTrackId=$audioTrackId")
+        }
+        return injected
+    }
+
     private suspend fun rewriteSegmentListToBase(
-        mpdXml: String,
+        doc: Document,
         mpdBaseUrl: String,
         httpClient: OkHttpClient
     ): String {
-        val doc = parseXml(mpdXml)
         val mpd = doc.documentElement
 
         // Probe sidx from ONE file to get the size. All representations with the same
         // segment count (2087) have the same sidx size (25076 bytes).
         val sidxSize = probeFirstSidx(doc, mpdBaseUrl, httpClient)
         if (sidxSize <= 0) {
-            Log.w(TAG, "No sidx found, returning original MPD")
-            return mpdXml
+            Log.w(TAG, "No sidx found, returning serialized (possibly role-injected) MPD")
+            return serializeXml(doc)
         }
 
         // Convert all SegmentList -> SegmentBase and make BaseURLs absolute
@@ -101,7 +139,7 @@ object MpdTimingCorrector {
 
         if (correctedCount == 0) {
             Log.w(TAG, "No representations corrected")
-            return mpdXml
+            return serializeXml(doc)
         }
 
         val profiles = mpd.getAttribute("profiles") ?: ""
