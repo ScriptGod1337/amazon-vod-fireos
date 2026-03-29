@@ -132,7 +132,6 @@ class PlayerActivity : AppCompatActivity() {
     private var currentAudioChannelCount: Int = 0
     private var currentVideoBitrateKbps: Int = 0
     private var resumeSeeked: Boolean = false
-    private var normalizedInitialAudioSelection: Boolean = false
     private var seekResyncPending: Boolean = false
     private var currentPlaybackInfo: PlaybackInfo? = null
     private var lastMediaSegmentUrl: String = ""
@@ -474,9 +473,14 @@ class PlayerActivity : AppCompatActivity() {
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
+                // AudioCapabilities controls which encodings the sink will pass through to the
+                // hardware decoder (EAC3, AC3, etc.). When passthrough is disabled, use the
+                // default capabilities (stereo PCM only) so the sink always decodes to PCM.
+                val caps = if (passthroughEnabled) AudioCapabilities.getCapabilities(context)
+                           else AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES
                 return DefaultAudioSink.Builder(context)
-                    .setAudioCapabilities(AudioCapabilities.getCapabilities(context))
-                    .setEnableAudioTrackPlaybackParams(passthroughEnabled)
+                    .setAudioCapabilities(caps)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .build()
             }
         }
@@ -570,7 +574,6 @@ class PlayerActivity : AppCompatActivity() {
                 .build()
         }
         trackSelector = selector
-        normalizedInitialAudioSelection = false
 
         // Trailers always start from beginning. For real content resume from ProgressRepository.
         // Restart recovery (RENDERER_DECODER_STALLED / PLAYER_CORRUPT_FRAGMENT) supplies an
@@ -797,7 +800,6 @@ class PlayerActivity : AppCompatActivity() {
 
         override fun onTracksChanged(tracks: Tracks) {
             audioTrackResolver.logCurrentAudioTracks(TAG, tracks)
-            normalizeInitialAudioSelection(tracks)
             updateTrackButtonLabels(tracks)
             Log.i(TAG, "Selected audio after tracksChanged: ${selectedAudioTrackSummary(tracks)}")
             PlaybackLogger.logVideoTracks(TAG, tracks)
@@ -1088,15 +1090,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun buildTrackOptions(trackType: Int, tracks: Tracks): List<AudioTrackResolver.TrackOption> =
         audioTrackResolver.buildTrackOptions(trackType, tracks)
-
-    private fun normalizeInitialAudioSelection(tracks: Tracks) {
-        if (normalizedInitialAudioSelection) return
-        val audioOptions = buildTrackOptions(C.TRACK_TYPE_AUDIO, tracks)
-        if (audioOptions.isEmpty()) {
-            return
-        }
-        normalizedInitialAudioSelection = true
-    }
 
     private fun updateTrackButtonLabels(tracks: Tracks? = player?.currentTracks) {
         val currentTracks = tracks ?: run {
