@@ -26,7 +26,12 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import android.os.Looper
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import com.scriptgod.fireos.avod.player.AudioTrackResolver
+import com.scriptgod.fireos.avod.player.BifThumbnailProvider
 import com.scriptgod.fireos.avod.player.MpdTimingCorrector
+import com.scriptgod.fireos.avod.player.StallWatchdog
+import com.scriptgod.fireos.avod.player.StreamReporter
+import com.scriptgod.fireos.avod.player.VideoFormatLabeler
 import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -82,7 +87,6 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_RESUME_MS = "extra_resume_ms"
         const val EXTRA_SERIES_ASIN = "extra_series_asin"
         const val EXTRA_SEASON_ASIN = "extra_season_asin"
-        private val CHANNEL_SUFFIX_REGEX = Regex("""\s+\d\.\d(\s*(surround|atmos))?""", RegexOption.IGNORE_CASE)
 
         // Widevine UUID
         private val WIDEVINE_UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
@@ -117,7 +121,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private val scopeJob = Job()
     private val scope = CoroutineScope(Dispatchers.Main + scopeJob)
-    private var heartbeatJob: Job? = null
     private var playbackJob: Job? = null
     private var currentAsin: String = ""
     private var currentSeriesAsin: String = ""
@@ -127,32 +130,24 @@ class PlayerActivity : AppCompatActivity() {
     private var currentAudioBitrateKbps: Int = 0
     private var currentAudioChannelCount: Int = 0
     private var currentVideoBitrateKbps: Int = 0
-    private var watchSessionId: String = UUID.randomUUID().toString()
-    private var pesSessionToken: String = ""
-    private var heartbeatIntervalMs: Long = 60_000
-    private var streamReportingStarted: Boolean = false
     private var resumeSeeked: Boolean = false
     private var normalizedInitialAudioSelection: Boolean = false
-    private var availableAudioTracks: List<AudioTrack> = emptyList()
-    private var lastLoggedAudioTrackSignature: String = ""
-    private var lastLoggedAudioResolutionSignature: String = ""
-    private var lastResumeSaveElapsedMs: Long = 0L
     private var seekResyncPending: Boolean = false
     private var currentPlaybackInfo: PlaybackInfo? = null
     private var lastMediaSegmentUrl: String = ""
     private var lastVideoSegmentUrl: String = ""
     private var lastAudioSegmentUrl: String = ""
-    private var stallWatchdogJob: Job? = null
-    /** How many RENDERER_DECODER_STALLED / PLAYER_CORRUPT_FRAGMENT restarts have been attempted. Reset on fresh loadAndPlay. */
-    private var stallRestartCount = 0
     /** True once an AUDIOTRACK_DOLBY restart (stereo fallback) has been attempted this session. */
     private var audioRestartDone = false
     private lateinit var cardSeekThumbnail: androidx.cardview.widget.CardView
     private lateinit var ivSeekThumbnail: android.widget.ImageView
     private lateinit var tvSeekTime: android.widget.TextView
-    /** BIF index: list of (timecodeMs, byteOffset) pairs loaded once per playback session. */
-    private var bifEntries: List<Pair<Long, Int>>? = null
-    private val thumbCache = android.util.LruCache<Int, android.graphics.Bitmap>(10)
+
+    // Extracted helper classes — instantiated in onCreate after scope is ready
+    private lateinit var audioTrackResolver: AudioTrackResolver
+    private lateinit var bifThumbnailProvider: BifThumbnailProvider
+    private lateinit var stallWatchdog: StallWatchdog
+    private lateinit var streamReporter: StreamReporter
     private val dpadSeekHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val hideThumbnailRunnable = Runnable { hideThumbnail() }
     /** Accumulated seek-preview position; -1 means not currently seeking. */
@@ -185,36 +180,6 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
     }
-    private data class TrackOption(
-        val group: Tracks.Group,
-        val groupIndex: Int,
-        val trackIndex: Int,
-        val label: String,
-        val familyKind: String,
-        val isSelected: Boolean,
-        val isAudioDescription: Boolean,
-        val bitrate: Int,
-        val language: String = ""
-    )
-
-    private data class AudioLiveCandidate(
-        val option: TrackOption,
-        val normalizedLanguage: String,
-        val rawLabel: String,
-        val channelCount: Int
-    )
-
-    private data class AudioResolvedOption(
-        val option: TrackOption,
-        val familyKey: String
-    )
-
-    private data class AudioMetadataFamily(
-        val familyKind: String,
-        val label: String,
-        val isAudioDescription: Boolean
-    )
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -296,6 +261,24 @@ class PlayerActivity : AppCompatActivity() {
         btnAudio.nextFocusDownId = R.id.btn_subtitle
         btnSubtitle.nextFocusUpId = R.id.btn_audio
 
+        audioTrackResolver = AudioTrackResolver(emptyList())
+        bifThumbnailProvider = BifThumbnailProvider(scope)
+        stallWatchdog = StallWatchdog(scope) { pos ->
+            val p = player ?: return@StallWatchdog
+            logPlaybackSnapshot(
+                "RENDERER_DECODER_STALLED",
+                "stallRestartCount=${stallWatchdog.stallRestartCount} " +
+                    "lastVideoSegment=$lastVideoSegmentUrl lastAudioSegment=$lastAudioSegmentUrl"
+            )
+            if (stallWatchdog.stallRestartCount > 20) {
+                showError("Playback stalled and could not be recovered automatically.")
+                return@StallWatchdog
+            }
+            val skipTo = pos + 10_000L
+            Log.w(TAG, "RENDERER_DECODER_STALLED: pos=${pos}ms — seeking to ${skipTo}ms (attempt ${stallWatchdog.stallRestartCount}/20)")
+            p.seekTo(skipTo)
+        }
+
         val asin = intent.getStringExtra(EXTRA_ASIN)
             ?: run { showError("No ASIN provided"); return }
         currentAsin = asin
@@ -315,6 +298,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         apiService = AmazonApiService(authService)
         ProgressRepository.init(applicationContext)
+        streamReporter = StreamReporter(apiService, ProgressRepository, scope)
 
         // Default to "Feature"; caller may pass "Trailer" via EXTRA_MATERIAL_TYPE.
         // GTI-format ASINs (amzn1.dv.gti.*) reject "Episode" with PRSInvalidRequest.
@@ -409,7 +393,7 @@ class PlayerActivity : AppCompatActivity() {
         tvError.visibility = View.GONE
         tvVideoFormat.text = ""   // clear stale label until new player reports its format
         playerView.useController = true
-        stallRestartCount = 0
+        stallWatchdog.stallRestartCount = 0
         audioRestartDone = false
         currentAudioBitrateKbps = 0
         currentAudioChannelCount = 0
@@ -426,13 +410,14 @@ class PlayerActivity : AppCompatActivity() {
             try {
                 val (info, detailAudioTracks) = withContext(Dispatchers.IO) {
                     apiService.detectTerritory()
-                val playbackInfo = apiService.getPlaybackInfo(asin, materialType, quality, watchSessionId)
+                val playbackInfo = apiService.getPlaybackInfo(asin, materialType, quality, streamReporter.watchSessionId)
                 val detailAudio = apiService.getDetailInfo(asin)?.audioTracks ?: emptyList()
                 playbackInfo to detailAudio
             }
-            availableAudioTracks = (info.audioTracks + detailAudioTracks)
+            val mergedAudioTracks = (info.audioTracks + detailAudioTracks)
                 .distinctBy { "${it.displayName}|${it.languageCode}|${it.type}|${it.index}" }
-            logAvailableAudioTracks("Merged audio metadata", availableAudioTracks)
+            audioTrackResolver.updateAvailableTracks(mergedAudioTracks)
+            logAvailableAudioTracks("Merged audio metadata", mergedAudioTracks)
             // Correct MPD timing: Amazon's SegmentList uses fixed duration that drifts ~41s
             // over 2h. Replace with SegmentBase+sidx for accurate segment timing.
             correctedMpdContent = withContext(Dispatchers.IO) {
@@ -445,7 +430,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
             currentPlaybackInfo = info
-            if (info.bifUrl.isNotEmpty()) loadBifIndex(info.bifUrl)
+            if (info.bifUrl.isNotEmpty()) bifThumbnailProvider.loadIndex(info.bifUrl)
             setupPlayer(info)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch playback info: ${e.message}", e)
@@ -482,7 +467,7 @@ class PlayerActivity : AppCompatActivity() {
                 append(" selectedQuality=").append(currentQuality)
                 append(" startPositionOverride=").append(startPositionOverride)
                 append(" stereoOnly=").append(stereoOnly)
-                append(" stallRestartCount=").append(stallRestartCount)
+                append(" stallRestartCount=").append(stallWatchdog.stallRestartCount)
                 append(" passthroughRequested=")
                     .append(getSharedPreferences("settings", MODE_PRIVATE).getBoolean(PREF_AUDIO_PASSTHROUGH, false))
                 append(" lastMediaSegment=").append(lastMediaSegmentUrl)
@@ -592,7 +577,7 @@ class PlayerActivity : AppCompatActivity() {
             val subConfig = MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(sub.url))
                 .setMimeType(MimeTypes.APPLICATION_TTML)
                 .setLanguage(sub.languageCode)
-                .setLabel(buildSubtitleLabel(sub.languageCode, sub.type))
+                .setLabel(audioTrackResolver.buildSubtitleLabel(sub.languageCode, sub.type))
                 .setSelectionFlags(if (sub.type == "forced") C.SELECTION_FLAG_FORCED else 0)
                 .build()
             SingleSampleMediaSource.Factory(dataSourceFactory)
@@ -663,15 +648,6 @@ class PlayerActivity : AppCompatActivity() {
         updateTrackButtonLabels()
     }
 
-    private fun buildSubtitleLabel(langCode: String, type: String): String {
-        val lang = java.util.Locale.forLanguageTag(langCode).displayLanguage
-        return when (type) {
-            "sdh" -> "$lang [SDH]"
-            "forced" -> "$lang [Forced]"
-            else -> lang
-        }
-    }
-
     /**
      * Reads the format currently being decoded by the video renderer.
      * player.videoFormat reflects the live ABR tier, not just the initially selected track.
@@ -679,46 +655,16 @@ class PlayerActivity : AppCompatActivity() {
      */
     private fun updateVideoFormatLabel() {
         val fmt = player?.videoFormat ?: run { tvVideoFormat.text = ""; tvAudioFormat.visibility = View.GONE; return }
-        val res = when (fmt.height) {
-            in 2160..Int.MAX_VALUE -> "4K"
-            1080                   -> "1080p"
-            720                    -> "720p"
-            0                      -> ""
-            else                   -> "${fmt.height}p"
-        }
-        val codec = when {
-            fmt.sampleMimeType?.contains("hevc", ignoreCase = true) == true -> "H265"
-            fmt.sampleMimeType?.contains("avc",  ignoreCase = true) == true -> "H264"
-            else -> ""
-        }
         // Primary: ExoPlayer colorInfo (populated when MPD has colorimetry attributes).
         // Fallback: codec string profile — Amazon uses hvc1.2.* / hev1.2.* (HEVC Main 10)
         // exclusively for HDR10 content; Dolby Vision containers start with dvhe/dvav.
         val codecs = fmt.codecs ?: ""
         Log.i(TAG, "Video format: ${fmt.height}p mime=${fmt.sampleMimeType} codecs=$codecs colorTransfer=${fmt.colorInfo?.colorTransfer}")
-        val hdr = when {
-            fmt.colorInfo?.colorTransfer == C.COLOR_TRANSFER_ST2084 -> "HDR10"
-            fmt.colorInfo?.colorTransfer == C.COLOR_TRANSFER_HLG    -> "HLG"
-            codecs.startsWith("dvhe") || codecs.startsWith("dvav")  -> "DV"
-            codecs.startsWith("hvc1.2") || codecs.startsWith("hev1.2") -> "HDR10"
-            else -> ""
-        }
-        val vBitrate = if (currentVideoBitrateKbps > 0) " · ${currentVideoBitrateKbps}k" else ""
-        val videoLabel = listOf(res, codec, hdr).filter { it.isNotEmpty() }.joinToString(" · ") + vBitrate
-        tvVideoFormat.text = videoLabel
-        tvVideoFormat.visibility = if (videoLabel.isBlank()) View.GONE else View.VISIBLE
-
-        val channels = when (currentAudioChannelCount) {
-            1 -> "1.0"
-            2 -> "2.0"
-            6 -> "5.1"
-            8 -> "7.1"
-            else -> if (currentAudioChannelCount > 0) "${currentAudioChannelCount}ch" else ""
-        }
-        val audioParts = listOf(channels, if (currentAudioBitrateKbps > 0) "${currentAudioBitrateKbps}k" else "").filter { it.isNotEmpty() }
-        val audioLabel = audioParts.joinToString(" · ")
-        tvAudioFormat.text = audioLabel
-        tvAudioFormat.visibility = if (audioLabel.isBlank()) View.GONE else View.VISIBLE
+        val labels = VideoFormatLabeler.computeFormatLabels(fmt, currentVideoBitrateKbps, currentAudioBitrateKbps, currentAudioChannelCount)
+        tvVideoFormat.text = labels.videoLabel
+        tvVideoFormat.visibility = if (labels.videoLabel.isBlank()) View.GONE else View.VISIBLE
+        tvAudioFormat.text = labels.audioLabel
+        tvAudioFormat.visibility = if (labels.audioLabel.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun updatePlaybackStatus() {
@@ -809,8 +755,8 @@ class PlayerActivity : AppCompatActivity() {
                     tvError.visibility = View.GONE
                     playerView.useController = true
                     updateVideoFormatLabel()
-                    if (!streamReportingStarted) {
-                        streamReportingStarted = true
+                    if (!streamReporter.streamReportingStarted) {
+                        streamReporter.streamReportingStarted = true
                         startStreamReporting()
                     }
                 }
@@ -836,9 +782,9 @@ class PlayerActivity : AppCompatActivity() {
             // Start watchdog when playing; stop only on intentional pause (playWhenReady=false).
             // Do NOT stop on isPlaying=false alone — that fires on every BUFFERING state change,
             // which would cancel the watchdog coroutine before its delay(2000) ever completes.
-            if (isPlaying) startStallWatchdog()
-            else if (player?.playWhenReady == false) stopStallWatchdog()
-            if (!streamReportingStarted) return
+            if (isPlaying) stallWatchdog.start { player }
+            else if (player?.playWhenReady == false) stallWatchdog.stop()
+            if (!streamReporter.streamReportingStarted) return
             if (isPlaying) {
                 startHeartbeat()
                 startResumeProgressUpdates()
@@ -847,7 +793,7 @@ class PlayerActivity : AppCompatActivity() {
                 // Paused — PlayerView keeps its controller visible automatically
                 persistPlaybackProgress(force = true)
                 sendProgressEvent("PAUSE")
-                heartbeatJob?.cancel()
+                streamReporter.cancelHeartbeat()
                 stopResumeProgressUpdates()
             }
         }
@@ -930,9 +876,9 @@ class PlayerActivity : AppCompatActivity() {
                 PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
                 PlaybackException.ERROR_CODE_DECODING_FAILED
             )
-            if (isCorruptFragment && stallRestartCount < 3) {
-                stallRestartCount++
-                Log.w(TAG, "PLAYER_CORRUPT_FRAGMENT: restarting at pos=${currentPos}ms (attempt $stallRestartCount/3)")
+            if (isCorruptFragment && stallWatchdog.stallRestartCount < 3) {
+                stallWatchdog.stallRestartCount++
+                Log.w(TAG, "PLAYER_CORRUPT_FRAGMENT: restarting at pos=${currentPos}ms (attempt ${stallWatchdog.stallRestartCount}/3)")
                 Toast.makeText(this@PlayerActivity, "Recovering from media error\u2026", Toast.LENGTH_SHORT).show()
                 restartPlayerAtPosition(currentPos, "PLAYER_CORRUPT_FRAGMENT")
                 return
@@ -948,89 +894,19 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun startStreamReporting() {
-        val positionSecs = currentPositionSecs()
-        scope.launch(Dispatchers.IO) {
-            // UpdateStream START
-            val interval = apiService.updateStream(currentAsin, "START", positionSecs, watchSessionId)
-            heartbeatIntervalMs = interval * 1000L
-
-            // PES V2 StartSession
-            val (token, pesInterval) = apiService.pesStartSession(currentAsin, positionSecs)
-            pesSessionToken = token
-            // Use the shorter of the two intervals
-            if (pesInterval > 0) {
-                heartbeatIntervalMs = minOf(heartbeatIntervalMs, pesInterval * 1000L)
-            }
-            Log.w(TAG, "Stream reporting started, heartbeat=${heartbeatIntervalMs}ms")
-        }
-        startHeartbeat()
-        startResumeProgressUpdates()
+        streamReporter.startStreamReporting(
+            positionProvider = { player?.currentPosition ?: 0L },
+            currentAsinProvider = { currentAsin },
+            onStartResumeProgressUpdates = { startResumeProgressUpdates() },
+            onStopResumeProgressUpdates = { stopResumeProgressUpdates() }
+        )
     }
 
     private fun startHeartbeat() {
-        heartbeatJob?.cancel()
-        heartbeatJob = scope.launch {
-            delay(heartbeatIntervalMs)
-            while (true) {
-                sendProgressEvent("PLAY")
-                delay(heartbeatIntervalMs)
-            }
-        }
-    }
-
-    /**
-     * Detects RENDERER_DECODER_STALLED: position frozen >6s with >30s buffered.
-     * Mirrors Amazon's RendererActivityWatchdog: full player restart at the stalled position
-     * (not a forward seek). Retry limit = 3, matching Amazon's PlaybackRestartType config.
-     */
-    private fun startStallWatchdog() {
-        if (stallWatchdogJob?.isActive == true) return  // already running; don't restart and reset delay
-        stallWatchdogJob = scope.launch {
-            var lastPos = -1L
-            var frozenSince = 0
-            while (true) {
-                delay(2_000)
-                val p = player ?: break
-                // Use playWhenReady, not isPlaying: during BUFFERING↔READY oscillation
-                // isPlaying is false and would reset frozenSince every tick, preventing detection.
-                // playWhenReady stays true whenever the user intends playback to run.
-                if (!p.playWhenReady) { frozenSince = 0; lastPos = -1L; continue }
-                val pos = p.currentPosition
-                val buffered = p.totalBufferedDuration
-                if (pos == lastPos && buffered > 30_000) {
-                    frozenSince++
-                    if (frozenSince >= 2) { // 4 seconds frozen
-                        logPlaybackSnapshot(
-                            "RENDERER_DECODER_STALLED",
-                            "frozenSince=${frozenSince * 2}s stallRestartCount=$stallRestartCount " +
-                                "lastVideoSegment=$lastVideoSegmentUrl lastAudioSegment=$lastAudioSegmentUrl"
-                        )
-                        stallRestartCount++
-                        if (stallRestartCount > 20) {
-                            Log.e(TAG, "RENDERER_DECODER_STALLED: exceeded retry limit, giving up")
-                            showError("Playback stalled and could not be recovered automatically.")
-                            break
-                        }
-                        val skipTo = pos + 10_000L
-                        Log.w(TAG, "RENDERER_DECODER_STALLED: pos=${pos}ms buffered=${buffered}ms — seeking to ${skipTo}ms (attempt $stallRestartCount/20)")
-                        withContext(Dispatchers.Main) {
-                            p.seekTo(skipTo)
-                        }
-                        frozenSince = 0
-                        lastPos = -1L
-                        // continue loop — if still stuck after seek, will detect again
-                    }
-                } else {
-                    frozenSince = 0
-                }
-                lastPos = pos
-            }
-        }
-    }
-
-    private fun stopStallWatchdog() {
-        stallWatchdogJob?.cancel()
-        stallWatchdogJob = null
+        streamReporter.startHeartbeat(
+            positionProvider = { player?.currentPosition ?: 0L },
+            currentAsinProvider = { currentAsin }
+        )
     }
 
     /**
@@ -1045,14 +921,14 @@ class PlayerActivity : AppCompatActivity() {
      * @param stereoOnly True for AUDIOTRACK_DOLBY restart: caps audio to 2 channels.
      */
     private fun restartPlayerAtPosition(posMs: Long, reason: String, stereoOnly: Boolean = false) {
-        Log.w(TAG, "PLAYER_RESTART: reason=$reason posMs=$posMs stereoOnly=$stereoOnly attempt=$stallRestartCount")
-        stopStallWatchdog()
+        Log.w(TAG, "PLAYER_RESTART: reason=$reason posMs=$posMs stereoOnly=$stereoOnly attempt=${stallWatchdog.stallRestartCount}")
+        stallWatchdog.stop()
         stopStreamReporting()
         player?.removeListener(playerListener)
         player?.removeAnalyticsListener(analyticsListener)
         player?.release()
         player = null
-        streamReportingStarted = false
+        streamReporter.streamReportingStarted = false
         resumeSeeked = false
         progressBar.visibility = View.VISIBLE
 
@@ -1061,10 +937,10 @@ class PlayerActivity : AppCompatActivity() {
         playbackJob = scope.launch {
             try {
                 val info = withContext(Dispatchers.IO) {
-                    apiService.getPlaybackInfo(currentAsin, currentMaterialType, currentQuality, watchSessionId)
+                    apiService.getPlaybackInfo(currentAsin, currentMaterialType, currentQuality, streamReporter.watchSessionId)
                 }
                 currentPlaybackInfo = info
-                if (info.bifUrl.isNotEmpty()) loadBifIndex(info.bifUrl)
+                if (info.bifUrl.isNotEmpty()) bifThumbnailProvider.loadIndex(info.bifUrl)
                 setupPlayer(info, startPositionOverride = posMs, stereoOnly = stereoOnly)
             } catch (e: Exception) {
                 Log.e(TAG, "PLAYER_RESTART: PRS re-fetch failed: ${e.message}", e)
@@ -1081,6 +957,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun stopResumeProgressUpdates() {
         playerView.removeCallbacks(resumeProgressRunnable)
     }
+
 
     private fun onPlaybackCompleted() {
         Log.w(TAG, "onPlaybackCompleted asin=$currentAsin type=$currentMaterialType season=$currentSeasonAsin")
@@ -1114,7 +991,7 @@ class PlayerActivity : AppCompatActivity() {
             Log.w(TAG, "onPlaybackCompleted → auto-play next episode ${next.asin}")
             // Update per-episode state before re-using loadAndPlay.
             currentAsin = next.asin
-            watchSessionId = UUID.randomUUID().toString()
+            streamReporter.watchSessionId = UUID.randomUUID().toString()
             // Clear the stale intent resume so loadAndPlay falls back to
             // ProgressRepository (respects prior partial progress on the next ep).
             intent.putExtra(EXTRA_RESUME_MS, 0L)
@@ -1124,103 +1001,33 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun sendProgressEvent(event: String) {
-        val positionSecs = currentPositionSecs()
-        persistPlaybackProgress(force = event != "PLAY")
-        scope.launch(Dispatchers.IO) {
-            // UpdateStream
-            val interval = apiService.updateStream(currentAsin, event, positionSecs, watchSessionId)
-            val newIntervalMs = interval * 1000L
-            if (newIntervalMs != heartbeatIntervalMs) {
-                heartbeatIntervalMs = newIntervalMs
-                Log.w(TAG, "Heartbeat interval updated to ${heartbeatIntervalMs}ms")
-            }
-
-            // PES V2 UpdateSession
-            if (pesSessionToken.isNotEmpty()) {
-                val (token, _) = apiService.pesUpdateSession(pesSessionToken, event, positionSecs, currentAsin)
-                if (token.isNotEmpty()) pesSessionToken = token
-            }
-        }
+        streamReporter.sendProgressEvent(
+            event = event,
+            positionProvider = { player?.currentPosition ?: 0L },
+            currentAsinProvider = { currentAsin },
+            persistCallback = { force -> persistPlaybackProgress(force) }
+        )
     }
 
     private fun stopStreamReporting() {
-        heartbeatJob?.cancel()
-        stopResumeProgressUpdates()
-        val positionSecs = currentPositionSecs()
-        scope.launch(Dispatchers.IO) {
-            apiService.updateStream(currentAsin, "STOP", positionSecs, watchSessionId)
-            if (pesSessionToken.isNotEmpty()) {
-                apiService.pesStopSession(pesSessionToken, positionSecs, currentAsin)
-                pesSessionToken = ""
-            }
-        }
+        streamReporter.stopStreamReporting(
+            positionProvider = { player?.currentPosition ?: 0L },
+            currentAsinProvider = { currentAsin },
+            onStopResumeProgressUpdates = { stopResumeProgressUpdates() }
+        )
     }
-
-    private fun currentPositionSecs(): Long = (player?.currentPosition ?: 0) / 1000
 
     private fun persistPlaybackProgress(force: Boolean) {
         val p = player ?: return
-        val posMs = p.currentPosition
-        if (!force && posMs <= 0L) return
-        if (!force && posMs - lastResumeSaveElapsedMs < 25_000L) return
-        ProgressRepository.update(currentAsin, posMs, p.duration, currentMaterialType, currentSeriesAsin, currentSeasonAsin)
-        lastResumeSaveElapsedMs = posMs
-    }
-
-    /**
-     * Downloads and parses the BIF file header + index table so individual frames can be
-     * fetched on demand via HTTP Range requests while the user scrubs.
-     *
-     * BIF header (64 bytes total):
-     *   bytes 0-7:   magic
-     *   bytes 8-11:  version (uint32 LE)
-     *   bytes 12-15: image count (uint32 LE)
-     *   bytes 16-19: timecode multiplier in ms (uint32 LE; e.g. 1000 = 1 frame/sec)
-     *   bytes 20-63: reserved
-     * BIF index starts at byte 64: N+1 entries of (uint32 timestamp, uint32 byteOffset),
-     * terminated by (0xFFFFFFFF, totalFileSize).
-     */
-    private fun loadBifIndex(bifUrl: String) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                // Fetch header to get image count and timecode multiplier.
-                val headerBytes = bifRangeGet(bifUrl, 0, 63) ?: return@launch
-                if (headerBytes.size < 20) return@launch
-                val buf = java.nio.ByteBuffer.wrap(headerBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                buf.position(8)  // skip magic
-                buf.int          // skip version
-                val imageCount = buf.int
-                val multiplier = buf.int.toLong().coerceAtLeast(1L)
-                if (imageCount <= 0 || imageCount > 100_000) return@launch
-
-                // Fetch the index table (N+1 entries × 8 bytes each).
-                val indexStart = 64L
-                val indexBytes = bifRangeGet(bifUrl, indexStart, indexStart + (imageCount + 1) * 8 - 1)
-                    ?: return@launch
-                val idxBuf = java.nio.ByteBuffer.wrap(indexBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                val entries = ArrayList<Pair<Long, Int>>(imageCount)
-                for (i in 0..imageCount) {
-                    val ts = idxBuf.int.toLong() and 0xFFFFFFFFL
-                    val off = idxBuf.int
-                    if (ts == 0xFFFFFFFFL) break
-                    entries.add(Pair(ts * multiplier, off))
-                }
-                Log.i(TAG, "BIF index loaded: ${entries.size} frames, multiplier=${multiplier}ms")
-                withContext(Dispatchers.Main) { bifEntries = entries }
-            } catch (e: Exception) {
-                Log.w(TAG, "BIF index load failed", e)
-            }
-        }
-    }
-
-    private fun bifRangeGet(url: String, from: Long, to: Long): ByteArray? {
-        return try {
-            val req = okhttp3.Request.Builder()
-                .url(url)
-                .header("Range", "bytes=$from-$to")
-                .get().build()
-            okhttp3.OkHttpClient().newCall(req).execute().body?.bytes()
-        } catch (e: Exception) { null }
+        streamReporter.persistPlaybackProgress(
+            force = force,
+            positionProvider = { p.currentPosition },
+            durationProvider = { p.duration },
+            currentAsinProvider = { currentAsin },
+            materialTypeProvider = { currentMaterialType },
+            seriesAsinProvider = { currentSeriesAsin },
+            seasonAsinProvider = { currentSeasonAsin }
+        )
     }
 
     private fun showThumbnailAt(posMs: Long) {
@@ -1232,34 +1039,10 @@ class PlayerActivity : AppCompatActivity() {
 
         val info = currentPlaybackInfo ?: return
         if (!info.hasThumbnails) return
-        val entries = bifEntries ?: return
-        if (entries.isEmpty()) return
+        if (!bifThumbnailProvider.hasBifEntries()) return
 
-        // Binary search: largest timecodeMs <= posMs.
-        var lo = 0; var hi = entries.size - 1
-        while (lo < hi) {
-            val mid = (lo + hi + 1) / 2
-            if (entries[mid].first <= posMs) lo = mid else hi = mid - 1
-        }
-        val idx = lo
-
-        val cached = thumbCache.get(idx)
-        if (cached != null) { ivSeekThumbnail.setImageBitmap(cached); return }
-
-        val fromOffset = entries[idx].second.toLong()
-        val toOffset = if (idx + 1 < entries.size) entries[idx + 1].second.toLong() - 1
-                       else fromOffset + 65535L
-
-        scope.launch(Dispatchers.IO) {
-            try {
-                val bytes = bifRangeGet(info.bifUrl, fromOffset, toOffset) ?: return@launch
-                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?: return@launch
-                thumbCache.put(idx, bmp)
-                withContext(Dispatchers.Main) { ivSeekThumbnail.setImageBitmap(bmp) }
-            } catch (e: Exception) {
-                Log.w(TAG, "BIF frame fetch failed idx=$idx", e)
-            }
+        bifThumbnailProvider.getThumbnailAt(posMs, info.bifUrl) { bmp ->
+            if (bmp != null) ivSeekThumbnail.setImageBitmap(bmp)
         }
     }
 
@@ -1293,26 +1076,13 @@ class PlayerActivity : AppCompatActivity() {
         updatePlaybackWakeState(player?.isPlaying == true)
     }
 
-    private fun playbackStateName(state: Int): String = when (state) {
-        Player.STATE_IDLE -> "IDLE"
-        Player.STATE_BUFFERING -> "BUFFERING"
-        Player.STATE_READY -> "READY"
-        Player.STATE_ENDED -> "ENDED"
-        else -> "UNKNOWN($state)"
-    }
+    private fun playbackStateName(state: Int): String = VideoFormatLabeler.playbackStateName(state)
 
-    private fun formatSummary(format: Format?): String {
-        if (format == null) return "none"
-        val label = format.label?.takeIf { it.isNotBlank() } ?: "no-label"
-        val mime = format.sampleMimeType ?: "no-mime"
-        val codecs = format.codecs ?: "no-codecs"
-        val lang = format.language ?: "und"
-        return "label=$label lang=$lang mime=$mime codecs=$codecs channels=${format.channelCount} bitrate=${format.bitrate}"
-    }
+    private fun formatSummary(format: Format?): String = VideoFormatLabeler.formatSummary(format)
 
     private fun selectedAudioTrackSummary(tracks: Tracks? = player?.currentTracks): String {
         val currentTracks = tracks ?: return "none"
-        val selectedOption = buildTrackOptions(C.TRACK_TYPE_AUDIO, currentTracks).firstOrNull { it.isSelected }
+        val selectedOption = audioTrackResolver.buildTrackOptions(C.TRACK_TYPE_AUDIO, currentTracks).firstOrNull { it.isSelected }
         if (selectedOption == null) return "none"
 
         val selectedFormat = currentTracks.groups
@@ -1345,463 +1115,8 @@ class PlayerActivity : AppCompatActivity() {
         )
     }
 
-    private fun buildTrackOptions(trackType: Int, tracks: Tracks): List<TrackOption> {
-        if (trackType == C.TRACK_TYPE_AUDIO) {
-            return buildAudioTrackOptions(tracks)
-        }
-
-        val groups = tracks.groups.filter { it.type == trackType }
-        val options = mutableListOf<TrackOption>()
-
-        groups.forEachIndexed { groupIndex, group ->
-            for (trackIndex in 0 until group.length) {
-                if (!group.isTrackSupported(trackIndex)) continue
-                val format = group.getTrackFormat(trackIndex)
-                val metadataName = if (trackType == C.TRACK_TYPE_AUDIO) {
-                    resolveAudioMetadataName(format, isAudioDescriptionTrack(format))
-                } else null
-                val isAd = trackType == C.TRACK_TYPE_AUDIO && isAudioDescriptionTrack(format, metadataName)
-                if (trackType == C.TRACK_TYPE_AUDIO) {
-                    val normalizedLanguage = normalizeAudioGroupLanguage(format.language)
-                    val rawLabel = format.label?.trim().orEmpty()
-                    val metadata = metadataName?.let { AudioTrack(displayName = it) }
-                    val familyKind = resolveAudioFamilyKind(format, metadata, rawLabel)
-                    val label = resolveAudioMenuLabel(
-                        normalizedLanguage = normalizedLanguage,
-                        metadata = metadata,
-                        rawLabel = rawLabel,
-                        fallbackLanguage = normalizedLanguage,
-                        channelCount = format.channelCount,
-                        familyKind = familyKind
-                    )
-                    options += TrackOption(
-                        group = group,
-                        groupIndex = groupIndex,
-                        trackIndex = trackIndex,
-                        label = label,
-                        familyKind = familyKind,
-                        isSelected = group.isTrackSelected(trackIndex),
-                        isAudioDescription = isAd,
-                        bitrate = format.bitrate
-                    )
-                } else {
-                    val label = buildTrackLabel(trackType, format, isAd, metadataName)
-                    options += TrackOption(
-                        group = group,
-                        groupIndex = groupIndex,
-                        trackIndex = trackIndex,
-                        label = label,
-                        familyKind = "text",
-                        isSelected = group.isTrackSelected(trackIndex),
-                        isAudioDescription = isAd,
-                        bitrate = format.bitrate
-                    )
-                }
-            }
-        }
-
-        val bestByLabel = linkedMapOf<String, TrackOption>()
-        for (option in options) {
-            val key = if (trackType == C.TRACK_TYPE_AUDIO) {
-                audioMenuKey(option.label, option.isAudioDescription)
-            } else {
-                option.label
-            }
-            val existing = bestByLabel[key]
-            val better = existing == null ||
-                (option.isSelected && !existing.isSelected) ||
-                (!existing.isSelected && option.bitrate > existing.bitrate)
-            if (better) {
-                bestByLabel[key] = option
-            }
-        }
-
-        return bestByLabel.values.sortedWith(
-            compareBy<TrackOption> { if (it.isAudioDescription) 1 else 0 }
-                .thenBy { it.label.lowercase() }
-        )
-    }
-
-    private fun buildAudioTrackOptions(tracks: Tracks): List<TrackOption> {
-        val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        val resolved = mutableListOf<TrackOption>()
-        val resolutionEntries = mutableListOf<String>()
-        val languageVariantCounts = mutableMapOf<String, Int>()
-        groups.forEachIndexed { groupIndex, group ->
-            for (trackIndex in 0 until group.length) {
-                if (!group.isTrackSupported(trackIndex)) continue
-                val format = group.getTrackFormat(trackIndex)
-                val normalizedLanguage = normalizeAudioGroupLanguage(format.language)
-                val rawLabel = format.label?.trim().orEmpty()
-                // Use MPD Role flag (set by MpdTimingCorrector for _descriptive AdaptationSets)
-                // as the authoritative AD signal before metadata lookup.
-                val mpdIsAd = (format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0
-                // Keep AD and non-AD ordinals independent so MPD track ordering (e.g.
-                // [dialog, descriptive, boost-medium]) doesn't shift the non-AD counter.
-                val variantKey = "$normalizedLanguage|${format.channelCount}|${if (mpdIsAd) "ad" else "main"}"
-                val variantOrdinal = languageVariantCounts[variantKey] ?: 0
-                languageVariantCounts[variantKey] = variantOrdinal + 1
-                val metadata = resolveAudioOptionMetadata(
-                    normalizedLanguage = normalizedLanguage,
-                    rawLabel = rawLabel,
-                    trackIndex = trackIndex,
-                    variantOrdinal = variantOrdinal,
-                    mpdIsAd = mpdIsAd
-                )
-                val isAd = isAudioDescriptionTrack(format, metadata?.displayName)
-                val familyKind = when {
-                    isAd -> "ad"
-                    else -> resolveAudioFamilyKind(format, metadata, rawLabel)
-                }
-                val label = resolveAudioMenuLabel(
-                    normalizedLanguage = normalizedLanguage,
-                    metadata = metadata,
-                    rawLabel = rawLabel,
-                    fallbackLanguage = normalizedLanguage,
-                    channelCount = format.channelCount,
-                    familyKind = familyKind
-                )
-                resolved += TrackOption(
-                    group = group,
-                    groupIndex = groupIndex,
-                    trackIndex = trackIndex,
-                    label = label,
-                    familyKind = familyKind,
-                    isSelected = group.isTrackSelected(trackIndex),
-                    isAudioDescription = familyKind == "ad",
-                    bitrate = format.bitrate,
-                    language = normalizedLanguage
-                )
-                resolutionEntries += "group=$groupIndex track=$trackIndex raw=${rawLabel.ifBlank { "-" }} lang=${format.language.orEmpty()} role=${format.roleFlags} channels=${format.channelCount} metadata=${metadata?.displayName ?: "-"} type=${metadata?.type ?: "-"} index=${metadata?.index ?: "-"} family=$familyKind label=$label selected=${group.isTrackSelected(trackIndex)}"
-            }
-        }
-
-        val resolutionSignature = resolutionEntries.joinToString(" || ")
-        if (resolutionSignature != lastLoggedAudioResolutionSignature) {
-            lastLoggedAudioResolutionSignature = resolutionSignature
-            Log.i(TAG, "Audio track resolution: ${resolutionEntries.joinToString(" | ")}")
-        }
-
-        val bestByLabel = linkedMapOf<String, TrackOption>()
-        for (option in resolved) {
-            val key = option.label
-                .replace("\\s+".toRegex(), " ")
-                .trim()
-                .lowercase()
-            val existing = bestByLabel[key]
-            val better = existing == null ||
-                (option.isSelected && !existing.isSelected) ||
-                (!existing.isSelected && option.bitrate > existing.bitrate)
-            if (better) {
-                bestByLabel[key] = option
-            }
-        }
-
-        val sorted = bestByLabel.values.sortedWith(
-            compareBy<TrackOption> { it.language }
-                .thenBy { if (it.isAudioDescription) 1 else 0 }
-                .thenBy { it.label.lowercase() }
-        )
-
-        Log.i(TAG, "Audio menu options: ${
-            sorted.joinToString(" | ") {
-                "label=${it.label}, selected=${it.isSelected}, group=${it.groupIndex}, track=${it.trackIndex}"
-            }
-        }")
-        return sorted
-    }
-
-    private fun resolveAudioOptionMetadata(
-        normalizedLanguage: String,
-        rawLabel: String,
-        trackIndex: Int,
-        variantOrdinal: Int,
-        mpdIsAd: Boolean = false
-    ): AudioTrack? {
-        if (availableAudioTracks.isEmpty()) return null
-
-        val directMatch = availableAudioTracks.firstOrNull {
-            it.displayName.equals(rawLabel, ignoreCase = true)
-        }
-        if (directMatch != null) return directMatch
-
-        val languageMatches = availableAudioTracks.filter {
-            normalizeAudioGroupLanguage(it.languageCode) == normalizedLanguage
-        }
-        if (languageMatches.isEmpty()) return null
-
-        // If the MPD authoritatively identifies this track's AD status, filter metadata
-        // to only match the correct family (descriptive vs. non-descriptive).
-        val typedByMpd = if (mpdIsAd) {
-            languageMatches.filter { it.type.equals("descriptive", ignoreCase = true) }
-                .ifEmpty { languageMatches }
-        } else {
-            languageMatches.filter { !it.type.equals("descriptive", ignoreCase = true) }
-                .ifEmpty { languageMatches }
-        }
-
-        val requestedFamily = audioFamilyKind(null, rawLabel)
-        val typedMatches = if (requestedFamily == "main") {
-            typedByMpd
-        } else {
-            typedByMpd.filter { audioFamilyKind(it, it.displayName) == requestedFamily }
-        }
-        val candidates = typedMatches.ifEmpty { typedByMpd }
-
-        val orderedByFamily = candidates
-            .sortedWith(
-                compareBy<AudioTrack> { audioFamilyRank(audioFamilyKind(it, it.displayName)) }
-                    .thenBy { it.displayName.length }
-            )
-            .distinctBy { audioFamilyKind(it, it.displayName) }
-
-        return orderedByFamily.getOrNull(variantOrdinal)
-            ?: orderedByFamily.firstOrNull()
-            ?: candidates.minWithOrNull(compareBy<AudioTrack> { it.displayName.length })
-    }
-
-    private fun metadataFamiliesForLanguage(normalizedLanguage: String): List<AudioMetadataFamily> {
-        return availableAudioTracks
-            .filter { normalizeAudioGroupLanguage(it.languageCode) == normalizedLanguage }
-            .map {
-                val familyKind = audioFamilyKind(it, it.displayName)
-                AudioMetadataFamily(
-                    familyKind = familyKind,
-                    label = it.displayName.replace("\\s+".toRegex(), " ").trim(),
-                    isAudioDescription = familyKind == "ad"
-                )
-            }
-            .distinctBy { it.familyKind }
-            .sortedBy { audioFamilyRank(it.familyKind) }
-    }
-
-    private fun audioFamilyRank(kind: String): Int = when (kind) {
-        "main" -> 0
-        "boost-medium" -> 1
-        "boost-high" -> 2
-        "boost" -> 3
-        "ad" -> 4
-        else -> 5
-    }
-
-    private fun decorateAudioLabel(
-        liveLabel: String,
-        metadataLabel: String,
-        familyKind: String,
-        normalizedLanguage: String,
-        channelCount: Int
-    ): String {
-        val cleanedLive = liveLabel.replace("\\s+".toRegex(), " ").trim()
-        val base = when {
-            familyKind == "main" && CHANNEL_SUFFIX_REGEX.containsMatchIn(cleanedLive) -> cleanedLive
-            metadataLabel.isNotBlank() -> metadataLabel
-            cleanedLive.isNotBlank() -> cleanedLive
-            else -> displayLanguage(normalizedLanguage)
-        }
-        return appendChannelLayout(base, channelCount)
-    }
-
-    private fun fallbackAudioLabel(candidate: AudioLiveCandidate, normalizedLanguage: String): String {
-        val cleanedLive = candidate.rawLabel.replace("\\s+".toRegex(), " ").trim()
-        val base = cleanedLive.ifBlank { displayLanguage(normalizedLanguage) }
-        return appendChannelLayout(base, candidate.channelCount)
-    }
-
-    private fun resolveAudioMenuLabel(
-        normalizedLanguage: String,
-        metadata: AudioTrack?,
-        rawLabel: String,
-        fallbackLanguage: String,
-        channelCount: Int,
-        familyKind: String
-    ): String {
-        val baseLanguage = displayLanguage(fallbackLanguage.ifBlank { normalizedLanguage })
-        val metadataLabel = metadata?.displayName?.replace("\\s+".toRegex(), " ")?.trim().orEmpty()
-        val liveLabel = rawLabel.replace("\\s+".toRegex(), " ").trim()
-        val resolved = when (familyKind) {
-            "main" -> when {
-                CHANNEL_SUFFIX_REGEX.containsMatchIn(liveLabel) -> liveLabel
-                metadataLabel.isNotBlank() -> metadataLabel
-                liveLabel.isNotBlank() -> liveLabel
-                else -> baseLanguage
-            }
-            "ad" -> when {
-                metadataLabel.isNotBlank() -> metadataLabel
-                liveLabel.isNotBlank() -> liveLabel
-                else -> "$baseLanguage [Audio Description]"
-            }
-            "boost-high" -> when {
-                metadataLabel.isNotBlank() -> "$metadataLabel [Dialogue Boost: High]"
-                liveLabel.isNotBlank() -> "$liveLabel [Dialogue Boost: High]"
-                else -> "$baseLanguage [Dialogue Boost: High]"
-            }
-            "boost-medium" -> when {
-                metadataLabel.isNotBlank() -> "$metadataLabel [Dialogue Boost: Medium]"
-                liveLabel.isNotBlank() -> "$liveLabel [Dialogue Boost: Medium]"
-                else -> "$baseLanguage [Dialogue Boost: Medium]"
-            }
-            "boost" -> when {
-                metadataLabel.isNotBlank() -> "$metadataLabel [Dialogue Boost]"
-                liveLabel.isNotBlank() -> "$liveLabel [Dialogue Boost]"
-                else -> "$baseLanguage [Dialogue Boost]"
-            }
-            else -> when {
-                metadataLabel.isNotBlank() -> metadataLabel
-                liveLabel.isNotBlank() -> liveLabel
-                else -> baseLanguage
-            }
-        }
-        return appendChannelLayout(resolved, channelCount)
-    }
-
-    private fun buildTrackLabel(trackType: Int, format: Format, isAudioDescription: Boolean, metadataName: String? = null): String {
-        val language = format.language
-            ?.let { java.util.Locale.forLanguageTag(it).displayLanguage }
-            ?.takeIf { it.isNotBlank() && !it.equals("und", ignoreCase = true) }
-            ?: "Unknown"
-
-        if (trackType == C.TRACK_TYPE_AUDIO) {
-            if (!metadataName.isNullOrBlank()) return metadataName
-            val label = format.label?.trim().orEmpty()
-            if (label.isNotBlank()) {
-                return if (isAudioDescription && !label.contains("AD", ignoreCase = true)) {
-                    "$label [AD]"
-                } else label
-            }
-            return if (isAudioDescription) "$language [Audio Description]" else language
-        }
-
-        val label = format.label?.trim().orEmpty()
-        if (label.isNotBlank()) return label
-        val flags = mutableListOf<String>()
-        if ((format.selectionFlags and C.SELECTION_FLAG_FORCED) != 0) flags += "Forced"
-        if ((format.roleFlags and C.ROLE_FLAG_DESCRIBES_MUSIC_AND_SOUND) != 0) flags += "SDH"
-        return listOf(language, flags.joinToString(" ")).filter { it.isNotBlank() }.joinToString(" ")
-    }
-
-    private fun resolveAudioMetadataName(
-        format: Format,
-        guessedAd: Boolean
-    ): String? {
-        if (availableAudioTracks.isEmpty()) return null
-        val normalizedLanguage = normalizeLanguageCode(format.language)
-        val directLabel = format.label?.trim().orEmpty()
-        if (directLabel.isNotBlank()) {
-            availableAudioTracks.firstOrNull { it.displayName.equals(directLabel, ignoreCase = true) }
-                ?.let { return it.displayName }
-        }
-
-        val languageMatches = availableAudioTracks.filter {
-            normalizeLanguageCode(it.languageCode) == normalizedLanguage
-        }
-
-        if (languageMatches.size == 1) return languageMatches.first().displayName
-
-        if (languageMatches.isNotEmpty()) {
-            val preferredMatches = if (guessedAd) {
-                languageMatches.filter {
-                    it.isAudioDescription() || it.type.equals("descriptive", ignoreCase = true)
-                }
-            } else {
-                languageMatches.filter {
-                    !it.isAudioDescription() &&
-                        it.type.equals("dialog", ignoreCase = true)
-                }.ifEmpty {
-                    languageMatches.filterNot {
-                        it.isAudioDescription()
-                    }
-                }
-            }
-            if (preferredMatches.size == 1) return preferredMatches.first().displayName
-            if (directLabel.isNotBlank()) {
-                preferredMatches.firstOrNull {
-                    it.displayName.contains(directLabel, ignoreCase = true)
-                }?.let { return it.displayName }
-            }
-        }
-
-        if (directLabel.isNotBlank()) {
-            availableAudioTracks.firstOrNull {
-                it.displayName.contains(directLabel, ignoreCase = true)
-            }?.let { return it.displayName }
-        }
-        return null
-    }
-
-    private fun resolveAudioFamilyKind(
-        format: Format,
-        metadata: AudioTrack?,
-        rawLabel: String
-    ): String {
-        val metadataType = metadata?.type.orEmpty()
-        val source = listOf(
-            metadata?.displayName.orEmpty(),
-            metadataType,
-            rawLabel,
-            format.label.orEmpty()
-        ).joinToString(" ").lowercase()
-        return when {
-            isAudioDescriptionTrack(format, metadata?.displayName) ||
-                metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") -> "ad"
-            source.contains("dialogue boost: high") -> "boost-high"
-            source.contains("dialogue boost: medium") -> "boost-medium"
-            source.contains("dialogue boost") -> "boost"
-            else -> "main"
-        }
-    }
-
-    private fun normalizeLanguageCode(languageCode: String?): String {
-        if (languageCode.isNullOrBlank()) return ""
-        return languageCode.replace('_', '-').lowercase()
-    }
-
-    private fun normalizeAudioGroupLanguage(languageCode: String?): String {
-        if (languageCode.isNullOrBlank()) return ""
-        return normalizeLanguageCode(languageCode).substringBefore('-')
-    }
-
-    private fun appendChannelLayout(label: String, channelCount: Int): String {
-        if (channelCount <= 0) return label
-        if (CHANNEL_SUFFIX_REGEX.containsMatchIn(label)) return label
-        val suffix = when (channelCount) {
-            1 -> "1.0"
-            2 -> "2.0"
-            6 -> "5.1"
-            8 -> "7.1"
-            else -> "${channelCount}.0"
-        }
-        return "$label $suffix"
-    }
-
-    private fun displayLanguage(normalizedLanguage: String): String =
-        normalizedLanguage
-            .takeIf { it.isNotBlank() }
-            ?.let { java.util.Locale.forLanguageTag(it).displayLanguage }
-            ?.takeIf { it.isNotBlank() && !it.equals("und", ignoreCase = true) }
-            ?: "Unknown"
-
-    private fun isDialogueBoostLabel(label: String): Boolean =
-        label.contains("dialogue boost", ignoreCase = true)
-
-    private fun audioFamilyKind(metadata: AudioTrack?, label: String): String {
-        val metadataType = metadata?.type.orEmpty()
-        val source = listOf(metadata?.displayName.orEmpty(), metadataType, label)
-            .joinToString(" ")
-            .lowercase()
-        return when {
-            metadataType.equals("descriptive", ignoreCase = true) ||
-                source.contains("audio description") -> "ad"
-            source.contains("dialogue boost: high") -> "boost-high"
-            source.contains("dialogue boost: medium") -> "boost-medium"
-            source.contains("dialogue boost") -> "boost"
-            else -> "main"
-        }
-    }
-
-    private fun buildAudioFamilyKey(normalizedLanguage: String, metadata: AudioTrack?, rawLabel: String): String {
-        return "$normalizedLanguage|${audioFamilyKind(metadata, rawLabel)}"
-    }
+    private fun buildTrackOptions(trackType: Int, tracks: Tracks): List<AudioTrackResolver.TrackOption> =
+        audioTrackResolver.buildTrackOptions(trackType, tracks)
 
     private fun logAvailableAudioTracks(prefix: String, tracks: List<AudioTrack>) {
         val summary = tracks.joinToString(" | ") {
@@ -1837,36 +1152,9 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
         val signature = entries.joinToString(" || ")
-        if (signature == lastLoggedAudioTrackSignature) return
-        lastLoggedAudioTrackSignature = signature
+        if (signature == audioTrackResolver.lastLoggedAudioTrackSignature) return
+        audioTrackResolver.lastLoggedAudioTrackSignature = signature
         Log.w(TAG, "Live audio tracks: ${entries.joinToString(" | ")}")
-    }
-
-    private fun audioMenuKey(label: String, isAudioDescription: Boolean): String {
-        val normalized = label
-            .replace("[Audio Description]", "", ignoreCase = true)
-            .replace("[Dialogue Boost: High]", "", ignoreCase = true)
-            .replace("[Dialogue Boost: Medium]", "", ignoreCase = true)
-            .replace("[Dialogue Boost]", "", ignoreCase = true)
-            .replace("[AD]", "", ignoreCase = true)
-            .replace(CHANNEL_SUFFIX_REGEX, "")
-            .trim()
-            .lowercase()
-        return "$normalized|${if (isAudioDescription) "ad" else "main"}"
-    }
-
-    private fun isAudioDescriptionTrack(format: Format, metadataName: String? = null): Boolean {
-        // Check live format role flags first — set when MPD contains <Role value="description">
-        // (injected by MpdTimingCorrector for audioTrackId="*_descriptive" AdaptationSets).
-        if ((format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO) != 0) return true
-        if (!metadataName.isNullOrBlank()) {
-            return metadataName.contains("audio description", ignoreCase = true) ||
-                metadataName.contains("[AD]", ignoreCase = true)
-        }
-        val label = format.label.orEmpty()
-        return label.contains("audio description", ignoreCase = true) ||
-            label.contains("described video", ignoreCase = true) ||
-            Regex("""\[AD]""", RegexOption.IGNORE_CASE).containsMatchIn(label)
     }
 
     private fun normalizeInitialAudioSelection(tracks: Tracks) {
@@ -2067,9 +1355,9 @@ class PlayerActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         persistPlaybackProgress(force = true)
-        if (streamReportingStarted) {
+        if (streamReporter.streamReportingStarted) {
             stopStreamReporting()
-            streamReportingStarted = false
+            streamReporter.streamReportingStarted = false
         }
         updatePlaybackWakeState(false)
         player?.pause()
