@@ -30,9 +30,6 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Generate version name
         id: version
         run: |
