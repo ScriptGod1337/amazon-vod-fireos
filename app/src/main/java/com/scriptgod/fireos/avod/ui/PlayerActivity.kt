@@ -49,6 +49,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var progressBar: ProgressBar
     private lateinit var tvError: TextView
+    private lateinit var tvNotice: TextView
+    private val noticeHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var trackButtons: LinearLayout
     private lateinit var tvPlaybackTitle: TextView
     private lateinit var tvPlaybackStatus: TextView
@@ -90,6 +92,7 @@ class PlayerActivity : AppCompatActivity() {
         playerView       = findViewById(R.id.player_view)
         progressBar      = findViewById(R.id.progress_bar)
         tvError          = findViewById(R.id.tv_error)
+        tvNotice         = findViewById(R.id.tv_notice)
         trackButtons     = findViewById(R.id.track_buttons)
         tvPlaybackTitle  = findViewById(R.id.tv_playback_title)
         tvPlaybackStatus = findViewById(R.id.tv_playback_status)
@@ -211,6 +214,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         scopeJob.cancel()
+        noticeHandler.removeCallbacksAndMessages(null)
         trackMenu.release()
         seekPreview.cancelPendingHide()
         orchestrator.release()
@@ -266,6 +270,12 @@ class PlayerActivity : AppCompatActivity() {
         override fun showBuffering() { progressBar.visibility = View.VISIBLE }
         override fun hideBuffering() { progressBar.visibility = View.GONE }
         override fun onError(message: String) = showError(message)
+        override fun onNotice(message: String) {
+            tvNotice.text = message
+            tvNotice.visibility = View.VISIBLE
+            noticeHandler.removeCallbacksAndMessages(null)
+            noticeHandler.postDelayed({ tvNotice.visibility = View.GONE }, 8_000L)
+        }
         override fun onFinish()  = finish()
         override fun onPlaybackLabelsChanged() = updateVideoFormatLabel()
         override fun onTracksChanged(tracks: Tracks) {

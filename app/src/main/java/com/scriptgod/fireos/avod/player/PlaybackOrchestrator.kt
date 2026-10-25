@@ -31,6 +31,7 @@ import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import com.scriptgod.fireos.avod.api.AmazonApiService
 import com.scriptgod.fireos.avod.auth.AmazonAuthService
 import com.scriptgod.fireos.avod.data.ProgressRepository
@@ -67,6 +68,8 @@ class PlaybackOrchestrator(
         fun showBuffering()
         fun hideBuffering()
         fun onError(message: String)
+        /** Transient on-screen status message (not an error). */
+        fun onNotice(message: String)
         fun onFinish()
         fun onPlaybackLabelsChanged()
         fun onTracksChanged(tracks: Tracks)
@@ -77,6 +80,11 @@ class PlaybackOrchestrator(
 
     companion object {
         private const val TAG = "PlaybackOrchestrator"
+        private const val MEDIA_LOAD_RETRIES = 3
+        private const val MAX_CDN_RESTARTS = 5
+        private const val MAX_MULTICHANNEL_RESTORES = 2
+        private const val MAX_RESTORE_PROBES = 10
+        private const val RESTORE_PROBE_INTERVAL_MS = 60_000L
         private const val PREF_AUDIO_PASSTHROUGH        = "audio_passthrough"
         private const val PREF_AUDIO_PASSTHROUGH_WARNED = "audio_passthrough_warned"
         private const val PREF_WIDEVINE_L3_WARNED       = "widevine_l3_warned"
@@ -120,6 +128,14 @@ class PlaybackOrchestrator(
     private var lastVideoSegmentUrl: String = ""
     private var lastAudioSegmentUrl: String = ""
     private var audioRestartDone: Boolean = false
+    private var cdnRestartCount: Int = 0
+    // The playback response names a backup CDN for each URL set; used for the rest of the title once the default CDN rejects.
+    private var useFailoverCdn: Boolean = false
+    // Multichannel audio failed at the CDN and playback is on a stereo rendition; see probeMultichannelRestore().
+    private var stereoFallbackActive: Boolean = false
+    private var failedMultichannelUrl: String? = null
+    private var multichannelRestoreCount: Int = 0
+    private var restoreProbeJob: Job? = null
     private var playbackJob: Job? = null
 
     private val streamReporter: StreamReporter = StreamReporter(apiService, ProgressRepository, scope)
@@ -171,6 +187,9 @@ class PlaybackOrchestrator(
         callbacks.showBuffering()
         stallWatchdog.stallRestartCount = 0
         audioRestartDone = false
+        cdnRestartCount = 0
+        useFailoverCdn = false
+        resetStereoFallback()
         currentAudioBitrateKbps = 0; currentAudioChannelCount = 0
         currentAudioSampleMimeType = ""; currentAudioCodecs = ""
         currentAudioSinkMode = "unknown"; currentAudioSinkCapabilities = "unknown"
@@ -195,13 +214,7 @@ class PlaybackOrchestrator(
                     .distinctBy { "${it.displayName}|${it.languageCode}|${it.type}|${it.index}" }
                 audioTrackResolver.updateAvailableTracks(mergedTracks)
                 PlaybackLogger.logAvailableAudioTracks(TAG, "Merged audio metadata", mergedTracks)
-                correctedMpdContent = withContext(Dispatchers.IO) {
-                    try {
-                        MpdTimingCorrector.correctMpd(info.manifestUrl, authService.buildAuthenticatedClient())
-                    } catch (e: Exception) {
-                        Log.e(TAG, "MPD correction failed: ${e.message}"); null
-                    }
-                }
+                correctedMpdContent = correctManifest(info)
                 currentPlaybackInfo = info
                 if (info.bifUrl.isNotEmpty()) bifThumbnailProvider.loadIndex(info.bifUrl)
                 setupPlayer(info, intentResumeMs = intentResumeMs)
@@ -209,6 +222,14 @@ class PlaybackOrchestrator(
                 Log.e(TAG, "Failed to fetch playback info: ${e.message}", e)
                 callbacks.onError("Playback error: ${e.message}")
             }
+        }
+    }
+
+    private suspend fun correctManifest(info: PlaybackInfo): String? = withContext(Dispatchers.IO) {
+        try {
+            MpdTimingCorrector.correctMpd(info.manifestUrl, authService.buildAuthenticatedClient())
+        } catch (e: Exception) {
+            Log.e(TAG, "MPD correction failed: ${e.message}"); null
         }
     }
 
@@ -225,11 +246,13 @@ class PlaybackOrchestrator(
         playbackJob = scope.launch {
             try {
                 val info = withContext(Dispatchers.IO) {
-                    apiService.getPlaybackInfo(currentAsin, currentMaterialType, currentQuality, streamReporter.watchSessionId)
+                    apiService.getPlaybackInfo(currentAsin, currentMaterialType, currentQuality, streamReporter.watchSessionId, cdnFailover = useFailoverCdn)
                 }
+                // The corrected MPD embeds absolute segment URLs, so it must follow the (possibly new) CDN.
+                correctedMpdContent = correctManifest(info)
                 currentPlaybackInfo = info
                 if (info.bifUrl.isNotEmpty()) bifThumbnailProvider.loadIndex(info.bifUrl)
-                setupPlayer(info, startPositionOverride = posMs, stereoOnly = stereoOnly)
+                setupPlayer(info, startPositionOverride = posMs, stereoOnly = stereoOnly || stereoFallbackActive)
             } catch (e: Exception) {
                 Log.e(TAG, "PLAYER_RESTART: PRS re-fetch failed: ${e.message}", e)
                 callbacks.onError("Restart failed: ${e.message}")
@@ -409,6 +432,7 @@ class PlaybackOrchestrator(
         } else httpDataSourceFactory
 
         val dashSource = DashMediaSource.Factory(dataSourceFactory)
+            .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(MEDIA_LOAD_RETRIES))
             .setDrmSessionManagerProvider(drmSessionManager.asDrmSessionManagerProvider())
             .createMediaSource(MediaItem.Builder().setUri(info.manifestUrl).build())
 
@@ -468,6 +492,61 @@ class PlaybackOrchestrator(
         callbacks.onPlayerReady(exoPlayer, selector)
         callbacks.hideBuffering()
         callbacks.onTracksChanged(exoPlayer.currentTracks)
+    }
+
+    private fun resetStereoFallback() {
+        restoreProbeJob?.cancel(); restoreProbeJob = null
+        stereoFallbackActive = false; failedMultichannelUrl = null; multichannelRestoreCount = 0
+    }
+
+    /**
+     * After a multichannel -> stereo fallback, periodically re-request the start of the file that failed.
+     * Once the CDN serves it again, restart at the current position with multichannel audio re-enabled.
+     */
+    private fun scheduleMultichannelRestoreProbe() {
+        val url = failedMultichannelUrl ?: return
+        if (multichannelRestoreCount >= MAX_MULTICHANNEL_RESTORES) return
+        restoreProbeJob?.cancel()
+        restoreProbeJob = scope.launch {
+            var attempt = 0
+            while (attempt < MAX_RESTORE_PROBES) {
+                kotlinx.coroutines.delay(RESTORE_PROBE_INTERVAL_MS)
+                if (player?.isPlaying != true) continue
+                attempt++
+                val posMs = player?.currentPosition ?: 0L
+                val durMs = player?.duration?.takeIf { it > 0 } ?: 0L
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { probeMultichannel(url, posMs, durMs) }.getOrDefault(false)
+                }
+                Log.w(TAG, "MULTICHANNEL_PROBE: attempt $attempt/$MAX_RESTORE_PROBES ok=$ok")
+                if (ok) {
+                    multichannelRestoreCount++
+                    stereoFallbackActive = false
+                    callbacks.onNotice("5.1 audio available again \u2014 switched back to 5.1")
+                    restartPlayerAtPosition(player?.currentPosition ?: 0L, "MULTICHANNEL_RESTORED")
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /**
+     * Mimics real playback: a 1 MB read at the byte offset matching the current position. A 1 KB
+     * read at offset 0 succeeded while real reads were still being reset by the CDN.
+     */
+    private fun probeMultichannel(url: String, posMs: Long, durMs: Long): Boolean {
+        val client = authService.buildAuthenticatedClient()
+        val total = client.newCall(okhttp3.Request.Builder().url(url).header("Range", "bytes=0-0").build())
+            .execute().use { r ->
+                if (r.code !in 200..299) return false
+                r.header("Content-Range")?.substringAfter('/')?.toLongOrNull()
+            } ?: return false
+        val chunk = 1L shl 20
+        val start = if (durMs > 0) (total * posMs / durMs).coerceIn(0L, maxOf(0L, total - chunk)) else 0L
+        val req = okhttp3.Request.Builder().url(url).header("Range", "bytes=$start-${start + chunk - 1}").build()
+        return client.newCall(req).execute().use { r ->
+            r.code in 200..299 && (r.body?.bytes()?.size ?: 0) >= chunk.coerceAtMost(total - start)
+        }
     }
 
     private fun releasePlayer() {
@@ -667,6 +746,34 @@ class PlaybackOrchestrator(
                 Log.w(TAG, "PLAYER_CORRUPT_FRAGMENT: restarting at pos=${currentPos}ms (attempt ${stallWatchdog.stallRestartCount}/3)")
                 Toast.makeText(context, "Recovering from media error\u2026", Toast.LENGTH_SHORT).show()
                 restartPlayerAtPosition(currentPos, "PLAYER_CORRUPT_FRAGMENT"); return
+            }
+            // The CDN intermittently rejects media requests (HTTP 400/403/5xx) after in-place retries are
+            // exhausted; a fresh playback-info request returns new URLs (often another CDN host).
+            val httpCode = httpCause?.responseCode
+            val isCdnReject = (httpCode != null && (httpCode == 400 || httpCode == 403 || httpCode == 429 || httpCode >= 500)) ||
+                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+            if (isCdnReject && cdnRestartCount < MAX_CDN_RESTARTS) {
+                cdnRestartCount++
+                // A fresh PRS keeps returning the same CDN host, so first switch to the backup CDN from the
+                // response; only if that fails too, fall back to a stereo rendition (a different file) when
+                // multichannel was playing.
+                val switchCdn = !useFailoverCdn
+                val multichannel = !switchCdn && currentAudioChannelCount > 2 && !stereoFallbackActive
+                Log.w(TAG, "PLAYER_CDN_REJECT: ${error.errorCodeName} http=$httpCode, restarting at pos=${currentPos}ms (attempt $cdnRestartCount/$MAX_CDN_RESTARTS backupCdn=$switchCdn stereoFallback=$multichannel)")
+                if (switchCdn) {
+                    useFailoverCdn = true
+                    callbacks.onNotice("CDN unavailable \u2014 switched to backup CDN")
+                } else if (multichannel) {
+                    stereoFallbackActive = true
+                    failedMultichannelUrl = failingUrl ?: generateSequence(error.cause) { it.cause }
+                        .filterIsInstance<HttpDataSource.HttpDataSourceException>().firstOrNull()?.dataSpec?.uri?.toString()
+                    callbacks.onNotice("5.1 audio unavailable \u2014 switched to stereo")
+                    scheduleMultichannelRestoreProbe()
+                } else {
+                    Toast.makeText(context, "Stream interrupted \u2014 reconnecting\u2026", Toast.LENGTH_SHORT).show()
+                }
+                restartPlayerAtPosition(currentPos, "PLAYER_CDN_REJECT"); return
             }
             persistPlaybackProgress(force = true)
             stopStreamReporting()

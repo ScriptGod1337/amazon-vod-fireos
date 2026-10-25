@@ -33,6 +33,22 @@
         android:textSize="@dimen/page_supporting_size"
         android:visibility="gone"/>
 
+    <TextView
+        android:id="@+id/tv_notice"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="64dp"
+        android:background="@drawable/player_error_panel"
+        android:maxWidth="560dp"
+        android:paddingStart="22dp"
+        android:paddingTop="14dp"
+        android:paddingEnd="22dp"
+        android:paddingBottom="14dp"
+        android:textColor="#F3F7FA"
+        android:textSize="@dimen/page_supporting_size"
+        android:visibility="gone"/>
+
     <LinearLayout
         android:id="@+id/track_buttons"
         android:layout_width="wrap_content"

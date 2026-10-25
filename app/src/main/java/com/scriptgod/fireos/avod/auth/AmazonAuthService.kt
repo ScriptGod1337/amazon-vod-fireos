@@ -176,6 +176,15 @@ class AmazonAuthService(private val tokenFile: File) {
                 val response = chain.proceed(request)
                 if (!response.isSuccessful) {
                     Log.e(TAG, "HTTP ${response.code} ${request.method} ${request.url}")
+                    if (shouldLog) {
+                        val body = runCatching { response.peekBody(512).string() }.getOrDefault("")
+                        Log.e(
+                            TAG,
+                            "HTTP ${response.code} detail: range=${request.header("Range")} " +
+                                "proto=${response.protocol} server=${response.header("Server")} " +
+                                "via=${response.header("Via")} body=${body.replace('\n', ' ')}"
+                        )
+                    }
                 }
                 response
             } catch (e: Exception) {

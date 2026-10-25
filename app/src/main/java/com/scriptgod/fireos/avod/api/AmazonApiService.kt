@@ -947,7 +947,8 @@ class AmazonApiService(private val authService: AmazonAuthService) {
         asin: String,
         videoMaterialType: String = "Feature",
         quality: PlaybackQuality = PlaybackQuality.HD,
-        watchSessionId: String? = null
+        watchSessionId: String? = null,
+        cdnFailover: Boolean = false
     ): PlaybackInfo {
         val did = deviceId()
         val params = buildString {
@@ -996,7 +997,7 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             throw RuntimeException("GetPlaybackResources failed: HTTP ${response.code} — $body")
         }
 
-        val manifestUrl = extractManifestUrl(body)
+        val manifestUrl = extractManifestUrl(body, cdnFailover)
         if (manifestUrl == null) {
             // Check for rights errors (rent/buy-only titles)
             val noRights = body.contains("PRS.NoRights")
@@ -1015,6 +1016,8 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             }
             Log.w(TAG, "Playback audio tracks asin=$asin: $summary")
         }
+
+        logUrlSets(body)
 
         val bifUrl = extractBifUrl(body)
         Log.i(TAG, "Trickplay BIF: ${if (bifUrl.isNotEmpty()) bifUrl.take(80) else "none"}")
@@ -1058,12 +1061,29 @@ class AmazonApiService(private val authService: AmazonAuthService) {
         }
     }
 
+    /** Logs the CDN URL sets and failover map of a GetPlaybackResources response (hosts only). */
+    private fun logUrlSets(json: String) {
+        try {
+            val pu = gson.fromJson(json, JsonObject::class.java).getAsJsonObject("playbackUrls") ?: return
+            val sets = pu.getAsJsonObject("urlSets") ?: return
+            val summary = sets.entrySet().joinToString(" | ") { (id, set) ->
+                val o = set.asJsonObject
+                val host = o.getAsJsonObject("urls")?.getAsJsonObject("manifest")
+                    ?.getAsJsonPrimitive("url")?.asString?.substringAfter("://")?.substringBefore('/')
+                "$id host=$host cdn=${o.get("cdn")} failover=${o.get("failover")}"
+            }
+            Log.w(TAG, "PRS urlSets default=${pu.get("defaultUrlSetId")}: $summary")
+        } catch (e: Exception) {
+            Log.w(TAG, "logUrlSets failed", e)
+        }
+    }
+
     /**
      * Extracts the DASH manifest URL from GetPlaybackResources JSON.
      * Handles both new (playbackUrls) and legacy (audioVideoUrls) formats.
      * Mirrors playback.py:88-158 (_ParseStreams).
      */
-    private fun extractManifestUrl(json: String): String? {
+    private fun extractManifestUrl(json: String, cdnFailover: Boolean = false): String? {
         return try {
             val root = gson.fromJson(json, JsonObject::class.java)
 
@@ -1072,7 +1092,14 @@ class AmazonApiService(private val authService: AmazonAuthService) {
             if (playbackUrls != null) {
                 val defaultId = playbackUrls.getAsJsonPrimitive("defaultUrlSetId")?.asString
                 val urlSets = playbackUrls.getAsJsonObject("urlSets")
-                val urlSet = if (defaultId != null) urlSets?.getAsJsonObject(defaultId) else null
+                val defaultSet = if (defaultId != null) urlSets?.getAsJsonObject(defaultId) else null
+                // The response links each URL set to the CDN to use on failure (failover.cdn.urlSetId).
+                val failoverSet = if (cdnFailover) {
+                    defaultSet?.getAsJsonObject("failover")?.getAsJsonObject("cdn")
+                        ?.getAsJsonPrimitive("urlSetId")?.asString?.let { urlSets?.getAsJsonObject(it) }
+                } else null
+                if (cdnFailover) Log.w(TAG, "CDN failover urlSet ${if (failoverSet != null) "selected" else "unavailable, using default"}")
+                val urlSet = failoverSet ?: defaultSet
                 val url = urlSet?.getAsJsonObject("urls")
                     ?.getAsJsonObject("manifest")
                     ?.getAsJsonPrimitive("url")?.asString
